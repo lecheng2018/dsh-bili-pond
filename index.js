@@ -1462,7 +1462,7 @@ const pondAccount = async () => {
         : mode === 'mixed'
           ? `内容来源：**推荐流为主、关键词补充** —— 先用 \`bili_feed\` 拉推荐流（一次拉 ps=${pool} 条，够这一轮挑），配额还剩很多时再用关键词搜索补一轮（bili_search），关键词${kws.length ? `用这些：${kws.join('、')}` : '用章程里的默认那几组'}。`
           : `内容来源：**只看推荐流** —— 用 \`bili_feed\` 拉 B站 给这个账号个性化推的内容（一次拉 ps=${pool} 条，够这一轮挑；不够再翻一页），**不要**按关键词搜视频。`
-          + `⚠️ 返回里 \`personalized:false\` = 推荐流接口异常、这一轮退了**全站热门**（不是「他的」推荐）—— 报告里必须如实带一句。`)
+          + `⚠️ 返回里 \`personalized:false\` = 这一轮**不是**账号个性化推荐（原因看 \`note\` 字段：接口异常退了全站热门，或登录态没被认出）—— 报告里必须如实带一句。`)
       + (filterOn
         ? `🛡 **广告/引流过滤开在工具层**：结果里被挡的已经不下发（被挡条数看返回的 \`filtered\` 字段，报统计就行）。`
           + `规则：${filterDesc}${bw.length ? `；自定义屏蔽词：${bw.slice(0, 20).join('、')}` : ''}${Number(cfg.minUpFans) > 0 ? `；UP 粉丝数下限 ${cfg.minUpFans}` : ''}。`
@@ -3270,7 +3270,8 @@ const pondAccount = async () => {
       if (!out.ok) out.error = '搜到了空结果'
     } catch (e) { out.error = '搜索失败：' + (e?.message ?? e) }
     /* ⭐ 2026-10-30：内容来源默认是推荐流（bili_feed），顺带真拉一次验证 ——
-     *    wbi 签名 / 推荐接口哪一环坏了，这里当场就能看见，别等值班轮白跑 */
+     *    wbi 签名 / 推荐接口 / 登录态哪一环坏了，这里当场就能看见，别等值班轮白跑。
+     *    个性化状态 + 前两条标题预览直接报出来，用户一眼看出「这是不是我的推荐」。 */
     if (out.ok && cfg.sourceMode !== 'search') {
       try {
         const f = await call('bili_feed', { pn: 1, ps: 5 })
@@ -3280,7 +3281,10 @@ const pondAccount = async () => {
           if (j && j.ok === false) {
             out.steps.push(`推荐流不可用：${j.error || '未知错误'}`)
           } else {
-            out.steps.push(`推荐流正常（拿到 ${j?.count ?? '?'} 条，过滤掉 ${j?.filtered ?? 0} 条）`)
+            const p = j.personalized !== false
+            out.steps.push(`推荐流${p ? '正常（个性化 ✓' : '❌ 非个性化（'}：拿到 ${j?.count ?? '?'} 条，过滤掉 ${j?.filtered ?? 0} 条${j?.note ? ' · ' + j.note : ''}${p ? '' : '）'}`)
+            const titles = (j?.videos || []).slice(0, 2).map((v) => v.title).filter(Boolean)
+            if (titles.length) out.steps.push(`推荐流前两条：${titles.join(' / ')}`)
           }
         } catch { out.steps.push('推荐流返回异常（没解析出 JSON）') }
       } catch (e) { out.steps.push('推荐流拉不动：' + String(e?.message ?? e).slice(0, 80)) }

@@ -770,7 +770,8 @@ async def bili_feed(pn: int = 1, ps: int = 20,
         include_blocked: True = 被过滤的视频也返回并带 blocked 原因（调试用，默认False）
 
     Returns:
-        JSON：personalized=true 表示个性化推荐流；false 表示接口异常退了全站热门（报告里要带一句）。
+        JSON：personalized=true 表示个性化推荐流；false 表示这一轮**不是**账号个性化
+        （接口异常退了全站热门，或登录态没被认出 —— 原因看 note 字段，报告里要带一句）。
         videos 列表字段与 bili_search 对齐（推荐流卡片本身不带简介，工具层已用 view 接口尽力补全）；
         被过滤的条数在 filtered（样例原因在 filteredSamples）。
         ⚠️ 需要登录（凭证有效）才是真正的个性化推荐；未登录时调 bili_login。
@@ -805,6 +806,7 @@ async def bili_feed(pn: int = 1, ps: int = 20,
         code = resp.get("code")
 
     personalized = True
+    note = ""
     if code != 0:
         # 兜底：旧接口 index/top（全站通用内容、非个性化）—— 聊胜于无，但要让使用者知道这轮不是「他的」推荐
         fallback = await _bili_api("GET", "https://api.bilibili.com/x/web-interface/index/top", cred,
@@ -814,6 +816,14 @@ async def bili_feed(pn: int = 1, ps: int = 20,
                               ensure_ascii=False)
         resp = fallback
         personalized = False
+        note = "推荐流接口异常，已退回全站热门（非个性化）"
+    else:
+        # ⭐ rcmd 对失效的登录态**不报错**，会静默按匿名回全站通用内容（code 0）——
+        #   data.mid 登录时 = 账号 mid，匿名时 = 0，这是唯一可靠的「真登录上了」铁证
+        feed_mid = int((resp.get("data") or {}).get("mid") or 0)
+        if feed_mid <= 0:
+            personalized = False
+            note = "登录态没被 rcmd 认出（SESSDATA 可能过期）—— 返回的是全站通用内容，请重新扫码登录"
 
     items = _feed_items(resp.get("data"))
     # rcmd 每回一页（ps 生效）直接用；旧接口一次回一大包 ⇒ 包内按页切
@@ -848,7 +858,7 @@ async def bili_feed(pn: int = 1, ps: int = 20,
                                                include_blocked, FILTER_MIN_FANS_DEFAULT)
         filtered = len(samples) if not include_blocked else len([v for v in videos if v.get("blocked")])
 
-    return json.dumps({"page": pn, "personalized": personalized, "count": len(videos), "videos": videos,
+    return json.dumps({"page": pn, "personalized": personalized, "note": note, "count": len(videos), "videos": videos,
                        "filtered": filtered, "filteredSamples": samples}, ensure_ascii=False)
 
 
