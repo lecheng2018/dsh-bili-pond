@@ -96,9 +96,12 @@ video = lambda bv, goto=None: {"bvid": bv, "title": "t", **({"goto": goto} if go
 old_style = [video("BV1old1"), video("BVad", "cm"), video("BVbg", "bangumi"), {"title": "no bvid"}, "垃圾条目"]
 got = feed_items(old_style)
 assert [v["bvid"] for v in got] == ["BV1old1"], f"老口径归一不对：{got}"
-# 新口径：{"items": [...]}，goto=av 的收
+# 新口径：{"item": [...]}（rcmd，单数 item！）
+rcmd_style = {"item": [video("BVrc1", "av"), video("BVrc2", "av")]}
+assert [v["bvid"] for v in feed_items(rcmd_style)] == ["BVrc1", "BVrc2"], "rcmd 口径归一不对"
+# 防一手 {"items": [...]}
 new_style = {"items": [video("BVnew1", "av"), video("BVnew2", "av")]}
 assert [v["bvid"] for v in feed_items(new_style)] == ["BVnew1", "BVnew2"], "新口径归一不对"
 assert feed_items(None) == [] and feed_items(42) == [] and feed_items({}) == [], "异常输入应给空列表"
 
-print(f"[OK] feed filter tests: {len(passed) + len(ads_cases) + len(spam_cases) + 10} cases")
+print(f"[OK] feed filter tests: {len(passed) + len(ads_cases) + len(spam_cases) + 11} cases")

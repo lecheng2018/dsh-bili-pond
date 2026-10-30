@@ -22,9 +22,10 @@ B站数据采集 MCP 服务，支持 OpenClaw / Claude Code / Cursor / Cline
 #      ⑨ 新增 `bili_like` / `bili_fav`：Video 只给了 like/has_liked，收藏得走原始 HTTP（`_bili_api`）
 #      ⑩ `_comment_state()` 单查评论存活：`bili_reply` 发送前、`bili_circle_reply` 找不到目标时用它分清
 #         「已删」和「掉出前 100 条窗口」，不再把两种原因混成一句话
-#      ⑪ 新增 `bili_feed` + `_screen_video()`：首页「推荐」流来源（`x/web-interface/index/top`，
-#         个性化靠登录态；wbi 签名只作 -403/-412 时的兜底重试）+ `_screen_video()` 在 MCP 层做
-#         确定性过滤（广告 / 引流小号 / 短链简介），被挡的视频不下发给模型 —— 零 token 成本；
+#      ⑪ 新增 `bili_feed` + `_screen_video()`：首页「推荐」流来源 —— 主路径 `wbi/index/top/feed/rcmd`
+#         （wbi 签名 + buvid3，个性化靠登录态；rcmd 卡片不带简介 ⇒ view 接口尽力补全再过筛），
+#         兜底 `index/top`（全站热门、非个性化，返回带 personalized:false）；`_screen_video()` 在
+#         MCP 层做确定性过滤（广告 / 引流小号 / 短链简介），被挡的视频不下发给模型 —— 零 token 成本；
 #         过滤开关与屏蔽词由宿主经 env 下发（BILI_FILTER_ADS / BILI_FILTER_SPAM / BILI_FILTER_WORDS /
 #         BILI_FILTER_MIN_FANS）
 #      ⑫ `bili_search` 加 `filter` 参数：与 `bili_feed` 共用同一套过滤（默认值同样来自 env）
@@ -310,15 +311,20 @@ def _norm_bvid(bvid: str) -> str:
     return "BV" + v[2:] if re.match(r"(?i)^bv[0-9a-z]{10}$", v) else ""
 
 
-async def _bili_api(method: str, url: str, cred: Credential, params: dict = None, data: dict = None) -> dict:
-    """带登录态打 B站 web 接口（cookie 直接取 cred.get_cookies()，csrf 由调用方填 bili_jct）。"""
+async def _bili_api(method: str, url: str, cred: Credential, params: dict = None, data: dict = None,
+                    extra_cookies: dict = None) -> dict:
+    """带登录态打 B站 web 接口（cookie 直接取 cred.get_cookies()，csrf 由调用方填 bili_jct）。
+    extra_cookies：临时叠在凭证 cookie 之上（buvid3 之类），不写回凭证文件。"""
+    cookies = cred.get_cookies() if cred else {}
+    if extra_cookies:
+        cookies = {**cookies, **extra_cookies}
     import aiohttp
     async with aiohttp.ClientSession() as sess:
         async with sess.request(
             method, url,
             params=params, data=data,
             headers={"User-Agent": _BILI_UA, "Referer": "https://www.bilibili.com/"},
-            cookies=cred.get_cookies(),
+            cookies=cookies,
             timeout=aiohttp.ClientTimeout(total=15),
         ) as resp:
             try:
@@ -395,6 +401,40 @@ def _wbi_sign(params: dict, mixin_key: str) -> dict:
     w_rid = hashlib.md5((urlencode(p) + mixin_key).encode("utf-8")).hexdigest()
     p["w_rid"] = w_rid
     return p
+
+
+async def _ensure_buvid(cred):
+    """拿一个稳定的 buvid3/buvid4：凭证里就有就直接用；没有就问 finger/spi 要一份并**写回凭证文件**
+    （推荐流的个性化跟 buvid 绑定，每次换新反而喂不出口味）。返回 (b3, b4, fetched)。"""
+    try:
+        cookies = cred.get_cookies() or {}
+    except Exception:
+        cookies = {}
+    if cookies.get("buvid3"):
+        return cookies["buvid3"], cookies.get("buvid4") or "", False
+    b3 = b4 = ""
+    try:
+        resp = await _bili_api("GET", "https://api.bilibili.com/x/frontend/finger/spi", cred)
+        data = resp.get("data") or {}
+        b3 = data.get("b_3") or ""
+        b4 = data.get("b_4") or ""
+    except Exception:
+        pass
+    if b3 and cred is not None:
+        # 写回凭证文件（原子写，跟 bili_login 同款），下次起进程就不用再要
+        try:
+            if CRED_FILE.exists():
+                old = json.loads(CRED_FILE.read_text(encoding="utf-8"))
+                if isinstance(old, dict) and not old.get("buvid3"):
+                    old["buvid3"] = b3
+                    if b4:
+                        old["buvid4"] = b4
+                    tmp = CRED_FILE.with_suffix(".json.tmp")
+                    tmp.write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
+                    os.replace(tmp, CRED_FILE)
+        except Exception:
+            pass  # 写不进就本次带上，下次再要
+    return b3, b4, True
 
 
 # ========== Tool: 扫码登录（生成二维码） ==========
@@ -666,16 +706,17 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank",
 def _feed_items(data):
     """首页推荐返回的 data 归一成「普通视频卡」列表（纯函数，可测）。
 
-    ⚠️ 2026-10-30 实测两种口径都存在：
-      · 匿名/老口径：data 直接是数组（一次回一大包，ps 参数被无视）；
-      · 登录/新口径：{"items": [...]}。
-    条目在老口径下**没有 goto 字段** ⇒ 不能拿 goto=='av' 当必要条件：
+    ⚠️ 2026-10-30 实测三种口径都存在：
+      · 旧接口 index/top：data 直接是数组（一次回一大包，ps 参数被无视）；
+      · 新接口 rcmd：{"item": [...]}（**单数 item**！每回一页，ps 生效）；
+      · 防一手 {"items": [...]}。
+    旧接口条目没有 goto 字段 ⇒ 不能拿 goto=='av' 当必要条件：
       · goto 存在且不是 'av' ⇒ 丢（cm=B站广告卡、bangumi/live 等另有所指）
       · 没有 goto 但有 bvid ⇒ 收（普通视频卡）
       · 连 bvid 都没有 ⇒ 丢
     """
     if isinstance(data, dict):
-        raw = data.get("items") or []
+        raw = data.get("items") or data.get("item") or []
     elif isinstance(data, list):
         raw = data
     else:
@@ -691,6 +732,31 @@ def _feed_items(data):
     return out
 
 
+async def _desc_enrich(videos: list, cred):
+    """rcmd 的卡片**不带简介/分区名**（过滤规则会瞎一半）⇒ 对窗口内缺 desc 的条目用 view 接口
+    尽力补全：间隔 120ms、失败就跳过（不挡视频，只影响过滤灵敏度）。"""
+    for v in videos:
+        if v.get("desc"):
+            continue
+        bvid = v.get("bvid")
+        if not bvid:
+            continue
+        try:
+            resp = await _bili_api("GET", "https://api.bilibili.com/x/web-interface/view", cred,
+                                   params={"bvid": bvid})
+            if resp.get("code") == 0:
+                d = resp.get("data") or {}
+                v["desc"] = (d.get("desc") or "")[:200]
+                v["tname"] = d.get("tname") or ""
+                if not v.get("aid"):
+                    v["aid"] = d.get("aid", 0)
+                if not v.get("pubdate"):
+                    v["pubdate"] = d.get("pubdate", 0)
+        except Exception:
+            pass
+        await asyncio.sleep(0.12)
+
+
 @tool()
 async def bili_feed(pn: int = 1, ps: int = 20,
                     filter: bool | None = None, include_blocked: bool = False) -> str:
@@ -698,35 +764,60 @@ async def bili_feed(pn: int = 1, ps: int = 20,
     获取B站首页「推荐」流 —— 按当前登录账号的口味个性化推的（就是你在B站首页刷到的那种）。
 
     Args:
-        pn: 第几页（1 起）。接口一次回一大包，这里在包内按页切
+        pn: 第几页（1 起，配合 fresh_idx 游标往后翻）
         ps: 每页数量，默认20，最大30
         filter: 是否过滤广告/引流视频（None = 按宿主设置来，默认开）
         include_blocked: True = 被过滤的视频也返回并带 blocked 原因（调试用，默认False）
 
     Returns:
-        JSON：videos 列表（bvid/标题/UP/播放/点赞/时长/简介等，字段与 bili_search 对齐）；
+        JSON：personalized=true 表示个性化推荐流；false 表示接口异常退了全站热门（报告里要带一句）。
+        videos 列表字段与 bili_search 对齐（推荐流卡片本身不带简介，工具层已用 view 接口尽力补全）；
         被过滤的条数在 filtered（样例原因在 filteredSamples）。
         ⚠️ 需要登录（凭证有效）才是真正的个性化推荐；未登录时调 bili_login。
     """
     cred = get_cred()
     ps = max(1, min(int(ps or 20), 30))
     pn = max(1, int(pn or 1))
-    base = {"ps": ps, "fresh_idx": pn * ps, "fresh_idx_1h": pn * ps, "fresh_idx_4h": pn * ps}
-    url = "https://api.bilibili.com/x/web-interface/index/top"
-    # ⭐ 主路径不带 wbi 签名（2026-10-30 实测：带 wbi/ 前缀的那条 404，裸路径匿名也是 code 0）；
-    #    万一登录态下被要求签名（-403/-412），补一次 wbi 再试，别把兜底当摆设
-    resp = await _bili_api("GET", url, cred, params=base)
+    b3, b4, _fetched = await _ensure_buvid(cred)
+    extra = {"buvid3": b3} if b3 else {}
+    if b4:
+        extra["buvid4"] = b4
+    mixin = await _wbi_keys(cred)
+    params = {
+        "ps": ps,
+        "fresh_idx": pn * ps,
+        "fresh_idx_1h": pn * ps,
+        "fresh_idx_4h": pn * ps,
+        "buvid": b3,
+        "platform": "web",
+        "channels": "",
+        "web_location": 1422201,
+        "x_orig_ver": 1,
+    }
+    url = "https://api.bilibili.com/x/web-interface/wbi/index/top/feed/rcmd"
+    resp = await _bili_api("GET", url, cred, params=_wbi_sign(params, mixin), extra_cookies=extra)
     code = resp.get("code")
     if code in (-403, -412) or (code == -1 and "HTTP 4" in str(resp.get("message", ""))):
+        # 签名被拒/风控：刷新 wbi key 重试一次，别把兜底当摆设，也别无脑轰炸
+        _wbi_cache["key"] = ""
         mixin = await _wbi_keys(cred)
-        resp = await _bili_api("GET", url, cred, params=_wbi_sign(base, mixin))
+        resp = await _bili_api("GET", url, cred, params=_wbi_sign(params, mixin), extra_cookies=extra)
         code = resp.get("code")
+
+    personalized = True
     if code != 0:
-        return json.dumps({"ok": False, "error": _risk_text(code, resp.get("message", ""))},
-                          ensure_ascii=False)
-    # 接口不理会 ps（实测一次回一大包）⇒ 按页在包内切
+        # 兜底：旧接口 index/top（全站通用内容、非个性化）—— 聊胜于无，但要让使用者知道这轮不是「他的」推荐
+        fallback = await _bili_api("GET", "https://api.bilibili.com/x/web-interface/index/top", cred,
+                                   params={"ps": ps, "fresh_idx": pn * ps, "fresh_idx_1h": pn * ps, "fresh_idx_4h": pn * ps})
+        if fallback.get("code") != 0:
+            return json.dumps({"ok": False, "error": _risk_text(resp.get("code"), resp.get("message", ""))},
+                              ensure_ascii=False)
+        resp = fallback
+        personalized = False
+
     items = _feed_items(resp.get("data"))
-    window = items[(pn - 1) * ps: (pn - 1) * ps + ps]
+    # rcmd 每回一页（ps 生效）直接用；旧接口一次回一大包 ⇒ 包内按页切
+    window = items if personalized else items[(pn - 1) * ps: (pn - 1) * ps + ps]
 
     videos = []
     for it in window:
@@ -750,11 +841,14 @@ async def bili_feed(pn: int = 1, ps: int = 20,
     ads_on, spam_on = (True, True) if filter is True else (FILTER_ADS_DEFAULT, FILTER_SPAM_DEFAULT)
     filtered, samples = 0, []
     if use_filter:
+        # rcmd 卡片不带简介 ⇒ 先补全再过筛（否则「简介短链」那类规则全瞎）
+        if personalized:
+            await _desc_enrich(videos, cred)
         videos, samples = await _screen_result(videos, ads_on, spam_on, cred,
                                                include_blocked, FILTER_MIN_FANS_DEFAULT)
         filtered = len(samples) if not include_blocked else len([v for v in videos if v.get("blocked")])
 
-    return json.dumps({"page": pn, "count": len(videos), "videos": videos,
+    return json.dumps({"page": pn, "personalized": personalized, "count": len(videos), "videos": videos,
                        "filtered": filtered, "filteredSamples": samples}, ensure_ascii=False)
 
 
