@@ -55,7 +55,7 @@ console.log('\n=== ② 没有任何老字段（新装）===')
 {
   const c = await loadWith({})
   console.log('   →', JSON.stringify({ perDayMax: c.perDayMax, autoRun: c.autoRun, dmOn: c.dmOn }))
-  ok(c.perDayMax === 18, '默认 perDayMax=18', String(c.perDayMax))
+  ok(c.perDayMax === 30, '默认 perDayMax=30（2026-10-30 从 18 抬升）', String(c.perDayMax))
   ok(c.autoRun === false, '默认 autoRun=false', String(c.autoRun))
   ok(c.dmOn === false, '默认 dmOn=false', String(c.dmOn))
 }

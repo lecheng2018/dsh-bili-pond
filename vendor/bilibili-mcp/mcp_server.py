@@ -22,15 +22,22 @@ B站数据采集 MCP 服务，支持 OpenClaw / Claude Code / Cursor / Cline
 #      ⑨ 新增 `bili_like` / `bili_fav`：Video 只给了 like/has_liked，收藏得走原始 HTTP（`_bili_api`）
 #      ⑩ `_comment_state()` 单查评论存活：`bili_reply` 发送前、`bili_circle_reply` 找不到目标时用它分清
 #         「已删」和「掉出前 100 条窗口」，不再把两种原因混成一句话
+#      ⑪ 新增 `bili_feed` + `_screen_video()` + `_wbi_get()`：首页「推荐」流来源（wbi 签名直打
+#         web 接口，个性化靠登录态）；`_screen_video()` 在 MCP 层做确定性过滤（广告 / 引流小号 /
+#         短链简介），被挡的视频不下发给模型 —— 零 token 成本；过滤开关与屏蔽词由宿主经
+#         env 下发（BILI_FILTER_ADS / BILI_FILTER_SPAM / BILI_FILTER_WORDS / BILI_FILTER_MIN_FANS）
+#      ⑫ `bili_search` 加 `filter` 参数：与 `bili_feed` 共用同一套过滤（默认值同样来自 env）
 import asyncio
 import json
 import base64
+import hashlib
 import os
 import re
 import sys
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import urlencode
 from mcp.server.fastmcp import FastMCP
 
 from bilibili_api import video, search, comment, Credential, dynamic, opus
@@ -98,6 +105,181 @@ def get_cred() -> Credential:
     return cred
 
 
+# ========== 内容过滤：广告 / 引流小号（纯函数，不联网、不发请求） ==========
+# ⭐ 设计原则：每条命中都必须能说出「为什么挡」—— 返回的理由会进模型的结果、最终写进使用者的报告，
+#    所以宁可规则简单可解释，也不做玄学打分。被挡的视频**不下发**（filteredSamples 里留几个样例）。
+# ⭐ 默认值来自宿主 env（模型不传参也生效）：
+#      BILI_FILTER_ADS=1        挡明显广告
+#      BILI_FILTER_SPAM=1       挡「资源分享」引流小号
+#      BILI_FILTER_WORDS=a|b    自定义屏蔽词（| 分隔；标题/简介/UP 名命中即挡）
+#      BILI_FILTER_MIN_FANS=0   UP 粉丝数下限（0 = 不查；查了要多打 user 接口）
+
+_FILTER_ENV_BOOL = lambda name, dflt=True: os.environ.get(name, "1" if dflt else "0").strip().lower() not in ("0", "false", "off", "no")
+
+FILTER_ADS_DEFAULT = _FILTER_ENV_BOOL("BILI_FILTER_ADS", True)
+FILTER_SPAM_DEFAULT = _FILTER_ENV_BOOL("BILI_FILTER_SPAM", True)
+FILTER_WORDS_DEFAULT = tuple(w.strip() for w in os.environ.get("BILI_FILTER_WORDS", "").split("|") if w.strip())
+FILTER_MIN_FANS_DEFAULT = max(0, int(os.environ.get("BILI_FILTER_MIN_FANS", "0") or 0))
+
+# 明显广告词：命中任意一个就挡。这些都是「卖东西」的硬信号，正常的教程 / 测评 / 分享视频不会带。
+_ADS_WORDS = (
+    "优惠券", "领券", "秒杀", "包邮", "清仓", "特卖", "返现", "返利", "红包封面",
+    "低价出", "出二手", "带货", "橱窗下单", "好物推荐", "下单链接", "购买链接",
+    "广告合作", "商务合作", "推广合作", "恰饭合作", "赞助合作",
+)
+
+# 「资源分享」类标题词：这类标题 + 简介里的网盘 / 短链 / 联系方式 = 引流小号的标准画像
+_RESOURCE_WORDS = (
+    "资源", "资料", "合集", "全套", "免费分享", "免费领", "免费送", "白嫖",
+    "无偿分享", "自取", "网课", "教程打包", "课程打包",
+)
+
+# 网盘 / 资源站关键词：简介里出现就要警惕
+_NETDISK_WORDS = (
+    "夸克网盘", "百度网盘", "百度云盘", "阿里云盘", "迅雷云盘", "迅雷下载",
+    "蓝奏云", "uc网盘", "uc云盘", "123云盘", "123盘", "天翼云盘", "城通网盘",
+    "网盘下载", "网盘链接", "网盘自取", "提取码", "解压密码",
+)
+
+# 联系方式 / 引流话术
+_CONTACT_WORDS = (
+    "+v", "加v", "vx", "vx号", "威信", "weixin", "微信群", "扣扣", "扣群",
+    "qq群", "q群", "公众号", "关注领取", "私信领取", "私信我", "评论区领取",
+    "置顶评论", "评论自取", "简介自取", "链接自取", "主页自取", "看主页",
+)
+
+# 短链域名：正规创作者几乎不用，是引流号的标配（b23.tv 是 B站官方短链，白名单）
+_SHORTLINK_HOSTS = (
+    "t.cn", "url.cn", "urlcn.cn", "dwz.cn", "bit.ly", "bit.do", "tinyurl.com",
+    "is.gd", "cutt.ly", "shorturl.at", "rb.gy", "t.ly", "clck.ru", "mrw.so",
+    "su8.ink",
+)
+
+# 可疑 TLD：正经创作者极少用这些域名挂正文链接，引流号爱用（便宜、好注册）
+_SPAM_TLDS = (
+    ".top", ".xyz", ".icu", ".vip", ".shop", ".site", ".online", ".cyou",
+    ".club", ".buzz", ".fun", ".space", ".store", ".website",
+)
+
+# 正规外链白名单：技术/内容平台，不算「乱七八糟的链接」（后缀匹配）
+_URL_TRUSTED_HOSTS = (
+    "b23.tv", "bilibili.com", "bilibili.tv", "bili2233.cn",
+    "github.com", "github.io", "gitee.com", "npmjs.com", "python.org",
+    "stackoverflow.com", "microsoft.com", "google.com",
+    "zhihu.com", "weibo.com", "qq.com", "weixin.qq.com", "douyin.com",
+    "youtube.com", "juejin.cn", "cnblogs.com", "csdn.net", "oschina.net",
+)
+
+_URL_RE = re.compile(r"https?://[^\s，。、；；）)】」\"'<>！!？?，]+", re.I)
+
+
+def _url_hosts(text: str):
+    """从文本里抠出所有 URL 的主机名（小写、去掉 www. 前缀）。"""
+    hosts = []
+    for u in _URL_RE.findall(text or ""):
+        m = re.match(r"https?://([^/：:/]+)", u, re.I)
+        if not m:
+            continue
+        host = m.group(1).lower().strip(".")
+        if host.startswith("www."):
+            host = host[4:]
+        hosts.append(host)
+    return hosts
+
+
+def _screen_video(title: str, desc: str = "", author: str = "", words=None, ads: bool = True, spam: bool = True):
+    """内容过滤纯函数。
+
+    返回 None = 通过；返回 (tag, reason) = 要挡：
+      tag ∈ {"ads", "spam", "word"}，reason 是一句给人看的话（会进报告，所以要能读）。
+    words 为 None 时用模块级 FILTER_WORDS_DEFAULT（宿主 env 下发的自定义屏蔽词）。
+    """
+    title = str(title or "")
+    desc = str(desc or "")
+    who = str(author or "")
+    blob = f"{title} {desc} {who}"
+
+    # ① 自定义屏蔽词：用户说了算，标题/简介/UP 名命中即挡
+    for w in (FILTER_WORDS_DEFAULT if words is None else words):
+        w = str(w or "").strip()
+        if w and w in blob:
+            return ("word", f"命中自定义屏蔽词「{w}」")
+
+    if ads:
+        for w in _ADS_WORDS:
+            if w in title or w in desc:
+                return ("ads", f"疑似广告（命中「{w}」）")
+
+    if spam:
+        hosts = _url_hosts(desc)
+        shortlink = any(h in _SHORTLINK_HOSTS for h in hosts)
+        # 不可信外链 = 不在白名单后缀里的
+        fishy_hosts = [h for h in hosts if not any(h.endswith(t) for t in _URL_TRUSTED_HOSTS)]
+        spam_tld = any(h.endswith(_SPAM_TLDS) for h in fishy_hosts)
+
+        # ② 简介里挂着短链（用户实测最烦的那类：简介下面只有一条乱七八糟的短链）
+        if shortlink:
+            return ("spam", "简介含短链域名（引流常见手法）")
+        # ③ 简介挂着可疑 TLD 的链接
+        if spam_tld:
+            return ("spam", "简介含可疑域名的链接（引流常见手法）")
+        # ④ 简介去掉链接后基本没字了 —— 「说是分享资源、简介就一条裸链接」的小号
+        bare = _URL_RE.sub("", desc).strip()
+        if fishy_hosts and len(bare) < 2:
+            return ("spam", f"简介只有一条裸链接（{fishy_hosts[0]}），没有别的内容")
+        # ⑤ 标题是资源分享口吻 + 简介带网盘 / 联系方式 / 不可信外链
+        res_title = any(w in title for w in _RESOURCE_WORDS)
+        if res_title:
+            netdisk = any(w in desc for w in _NETDISK_WORDS)
+            contact = any(w.lower() in desc.lower() for w in _CONTACT_WORDS)
+            if netdisk or contact or fishy_hosts:
+                why = "网盘" if netdisk else ("联系方式" if contact else "外链")
+                return ("spam", f"资源分享 + 简介带{why}（典型引流小号）")
+        # ⑥ 网盘 + 联系方式同时出现（即使标题没命中资源词，也基本是引流）
+        if any(w in desc for w in _NETDISK_WORDS) and any(w.lower() in desc.lower() for w in _CONTACT_WORDS):
+            return ("spam", "简介同时出现网盘与联系方式（引流）")
+
+    return None
+
+
+def _sec_to_dur(sec) -> str:
+    """秒 → 「MM:SS / H:MM:SS」（搜索接口给的就是这种字符串，章程按这个口径教模型读）。"""
+    try:
+        s = max(0, int(sec or 0))
+    except (TypeError, ValueError):
+        return "0:00"
+    h, rem = divmod(s, 3600)
+    m, sec2 = divmod(rem, 60)
+    return f"{h}:{m:02d}:{sec2:02d}" if h else f"{m}:{sec2:02d}"
+
+
+async def _fans_of(mid, cred) -> int | None:
+    """查一个 UP 的粉丝数（x/space/relation/stat）；失败返回 None（查不到就不因此挡视频）。"""
+    try:
+        resp = await _bili_api("GET", "https://api.bilibili.com/x/space/relation/stat", cred,
+                               params={"mid": int(mid)})
+        if resp.get("code") == 0:
+            return int((resp.get("data") or {}).get("follower") or 0)
+    except Exception:
+        pass
+    return None
+
+
+async def _apply_fans_floor(videos, cred, floor: int, limit: int = 10):
+    """对候选批量查粉丝数，低于 floor 的就地打 blocked。最多查 limit 个（省 API 调用，防风控）。"""
+    if floor <= 0:
+        return
+    for v in videos[:limit]:
+        if v.get("blocked"):
+            continue
+        mid = v.get("mid") or 0
+        if not mid:
+            continue
+        fans = await _fans_of(mid, cred)
+        if fans is not None and fans < floor:
+            v["blocked"] = f"UP 粉丝数 {fans} 低于门槛 {floor}"
+
+
 # ========== 原始 HTTP：SDK 没有的能力（收藏、单条评论核对） ==========
 
 _BILI_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -162,6 +344,56 @@ async def _comment_state(rpid: int, aid: int, cred: Credential) -> str:
     if resp.get("code") == 12006:  # 接口原文：没有该评论
         return "gone"
     return "unknown"
+
+
+# ========== wbi 签名（首页推荐等接口要求；公开算法，见 SocialSisterYi/bilibili-API-collect） ==========
+
+_WBI_MIXIN_TAB = [
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
+    33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61,
+    26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36,
+    20, 34, 44, 52,
+]
+
+_wbi_cache = {"key": "", "at": 0.0}
+
+
+def _wbi_mixin_key(img_key: str, sub_key: str) -> str:
+    raw = (img_key or "") + (sub_key or "")
+    return "".join(raw[i] for i in _WBI_MIXIN_TAB if i < len(raw))[:32]
+
+
+async def _wbi_keys(cred) -> str:
+    """拿 nav 里的 img/sub key 拼出 32 位混淆 key；缓存 1 小时（key 约一天一换）。"""
+    import aiohttp
+    now = time.time()
+    if _wbi_cache["key"] and now - _wbi_cache["at"] < 3600:
+        return _wbi_cache["key"]
+    url = "https://api.bilibili.com/x/web-interface/nav"
+    async with aiohttp.ClientSession() as sess:
+        async with sess.get(url, headers={"User-Agent": _BILI_UA, "Referer": "https://www.bilibili.com/"},
+                            cookies=cred.get_cookies() if cred else None,
+                            timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            data = await resp.json(content_type=None)
+    wbi = ((data.get("data") or {}).get("wbi_img") or {})
+    img = (wbi.get("img_url") or "").rsplit("/", 1)[-1].split(".")[0]
+    sub = (wbi.get("sub_url") or "").rsplit("/", 1)[-1].split(".")[0]
+    key = _wbi_mixin_key(img, sub)
+    if not key:
+        raise Exception("拿不到 wbi key（nav 接口返回异常），推荐流暂时用不了")
+    _wbi_cache["key"] = key
+    _wbi_cache["at"] = now
+    return key
+
+
+def _wbi_sign(params: dict, mixin_key: str) -> dict:
+    """给查询参数签出 w_rid/wts（特殊字符按官方口径过滤，按键排序后 md5）。"""
+    p = {k: "".join(ch for ch in str(v) if ch not in "!'()*") for k, v in params.items()}
+    p["wts"] = int(time.time())
+    p = dict(sorted(p.items()))
+    w_rid = hashlib.md5((urlencode(p) + mixin_key).encode("utf-8")).hexdigest()
+    p["w_rid"] = w_rid
+    return p
 
 
 # ========== Tool: 扫码登录（生成二维码） ==========
@@ -337,8 +569,39 @@ async def bili_check_credential() -> str:
 
 # ========== Tool 1: 搜索视频 ==========
 
+async def _screen_result(videos: list, ads: bool, spam: bool, cred, include_blocked: bool, fans_floor: int):
+    """对一批候选跑过滤，返回 (kept, blocked_samples)。
+    被挡的默认不下发；include_blocked=True 时留在原地并带 blocked 字段（调试用）。"""
+    kept, blocked = [], []
+    for v in videos:
+        hit = _screen_video(v.get("title", ""), v.get("description", "") or v.get("desc", ""),
+                            v.get("author", ""), ads=ads, spam=spam)
+        if hit:
+            blocked.append({"bvid": v.get("bvid", ""), "title": v.get("title", "")[:50], "reason": hit[1]})
+            if include_blocked:
+                v = dict(v)
+                v["blocked"] = hit[1]
+                kept.append(v)
+            continue
+        kept.append(v)
+    # UP 粉丝数门槛（默认关，开了要多打 user 接口）：对通过文本筛的候选查，低于门槛再挡
+    if fans_floor > 0 and kept:
+        await _apply_fans_floor(kept, cred, fans_floor)
+        survivors = []
+        for v in kept:
+            if v.get("blocked"):
+                blocked.append({"bvid": v.get("bvid", ""), "title": v.get("title", "")[:50], "reason": v["blocked"]})
+                if include_blocked:
+                    survivors.append(v)
+                continue
+            survivors.append(v)
+        kept = survivors
+    return kept, blocked[:5]
+
+
 @tool()
-async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> str:
+async def bili_search(keyword: str, num: int = 10, order: str = "totalrank",
+                      filter: bool | None = None, include_blocked: bool = False) -> str:
     """
     搜索B站视频
 
@@ -346,9 +609,12 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> 
         keyword: 搜索关键词，如"AI Agent"、"大模型教程"
         num: 返回视频数量，默认10，最大50
         order: 排序方式 totalrank=综合 click=播放量 pubdate=最新 dm=弹幕
-    
+        filter: 是否过滤广告/引流视频（None = 按宿主设置来，默认开）
+        include_blocked: True = 被过滤的视频也返回并带 blocked 原因（调试用，默认False）
+
     Returns:
-        JSON格式的视频列表，包含标题、BV号、播放量、评论数、UP主等
+        JSON格式的视频列表，包含标题、BV号、播放量、评论数、UP主等；
+        被过滤的条数在 filtered 字段（样例原因在 filteredSamples）
     """
     order_map = {
         "totalrank": search.OrderVideo.TOTALRANK,
@@ -373,6 +639,7 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> 
             "aid": item.get("aid", 0),
             "title": title,
             "author": item.get("author", ""),
+            "mid": item.get("mid", 0),
             "play": item.get("play", 0),
             "review": item.get("review", 0),
             "danmaku": item.get("video_review", 0),
@@ -380,7 +647,85 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> 
             "description": item.get("description", "")[:200],
         })
 
-    return json.dumps({"keyword": keyword, "count": len(videos), "videos": videos}, ensure_ascii=False)
+    use_filter = bool(filter) if filter is not None else (FILTER_ADS_DEFAULT or FILTER_SPAM_DEFAULT)
+    ads_on, spam_on = (True, True) if filter is True else (FILTER_ADS_DEFAULT, FILTER_SPAM_DEFAULT)
+    filtered, samples = 0, []
+    if use_filter:
+        cred = load_credential()
+        videos, samples = await _screen_result(videos, ads_on, spam_on, cred,
+                                               include_blocked, FILTER_MIN_FANS_DEFAULT)
+        filtered = len(samples) if not include_blocked else len([v for v in videos if v.get("blocked")])
+
+    return json.dumps({"keyword": keyword, "count": len(videos), "videos": videos,
+                       "filtered": filtered, "filteredSamples": samples}, ensure_ascii=False)
+
+
+# ========== Tool 1b: 首页推荐流 ==========
+
+@tool()
+async def bili_feed(pn: int = 1, ps: int = 20,
+                    filter: bool | None = None, include_blocked: bool = False) -> str:
+    """
+    获取B站首页「推荐」流 —— 按当前登录账号的口味个性化推的（就是你在B站首页刷到的那种）。
+
+    Args:
+        pn: 第几页（1 起）。翻页会往后拿更多推荐
+        ps: 每页数量，默认20，最大30
+        filter: 是否过滤广告/引流视频（None = 按宿主设置来，默认开）
+        include_blocked: True = 被过滤的视频也返回并带 blocked 原因（调试用，默认False）
+
+    Returns:
+        JSON：videos 列表（bvid/标题/UP/播放/点赞/时长/简介等，字段与 bili_search 对齐）；
+        被过滤的条数在 filtered（样例原因在 filteredSamples）。
+        ⚠️ 需要登录（凭证有效）才是真正的个性化推荐；未登录时调 bili_login。
+    """
+    cred = get_cred()
+    ps = max(1, min(int(ps or 20), 30))
+    pn = max(1, int(pn or 1))
+    mixin = await _wbi_keys(cred)
+    params = _wbi_sign({
+        "ps": ps,
+        "fresh_idx": pn * ps,
+        "fresh_idx_1h": pn * ps,
+        "fresh_idx_4h": pn * ps,
+    }, mixin)
+    resp = await _bili_api("GET", "https://api.bilibili.com/x/web-interface/wbi/index/top", cred, params=params)
+    if resp.get("code") != 0:
+        return json.dumps({"ok": False, "error": _risk_text(resp.get("code"), resp.get("message", ""))},
+                          ensure_ascii=False)
+    items = (resp.get("data") or {}).get("items") or []
+
+    videos = []
+    for it in items:
+        # 只收普通视频卡：goto=av；cm 是B站自己的广告位、bangumi/live 等另有所指，全不要
+        if it.get("goto") not in ("av",) or not it.get("bvid"):
+            continue
+        owner = it.get("owner") or {}
+        stat = it.get("stat") or {}
+        videos.append({
+            "bvid": it.get("bvid", ""),
+            "aid": it.get("id", 0) or it.get("aid", 0),
+            "title": it.get("title", ""),
+            "author": owner.get("name", ""),
+            "mid": owner.get("mid", 0),
+            "play": stat.get("view", 0),
+            "like": stat.get("like", 0),
+            "duration": _sec_to_dur(it.get("duration", 0)),
+            "desc": (it.get("desc", "") or "")[:200],
+            "tname": it.get("tname", ""),
+            "pubdate": it.get("pubdate", 0),
+        })
+
+    use_filter = bool(filter) if filter is not None else (FILTER_ADS_DEFAULT or FILTER_SPAM_DEFAULT)
+    ads_on, spam_on = (True, True) if filter is True else (FILTER_ADS_DEFAULT, FILTER_SPAM_DEFAULT)
+    filtered, samples = 0, []
+    if use_filter:
+        videos, samples = await _screen_result(videos, ads_on, spam_on, cred,
+                                               include_blocked, FILTER_MIN_FANS_DEFAULT)
+        filtered = len(samples) if not include_blocked else len([v for v in videos if v.get("blocked")])
+
+    return json.dumps({"page": pn, "count": len(videos), "videos": videos,
+                       "filtered": filtered, "filteredSamples": samples}, ensure_ascii=False)
 
 
 # ========== Tool 2: 获取评论 ==========

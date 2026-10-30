@@ -778,6 +778,12 @@ window.__ModuleLoader__.load({
       const [maxDur, setMaxDur] = React.useState(null)          // 最长分钟
       const [preferSub, setPreferSub] = React.useState(null)    // 字幕优先
       const [probeMax, setProbeMax] = React.useState(null)      // 最多查几条字幕
+      /* 内容来源与过滤（2026-10-30 重构）：同样绑本地草稿，防 /status 轮询冲掉输入 */
+      const [sourceMode, setSourceMode] = React.useState(null)  // feed / mixed / search
+      const [filterAds, setFilterAds] = React.useState(null)    // 挡明显广告
+      const [filterSpam, setFilterSpam] = React.useState(null)  // 挡引流小号
+      const [blockWords, setBlockWords] = React.useState(null)  // 自定义屏蔽词（每行一个）
+      const [minUpFans, setMinUpFans] = React.useState(null)    // UP 粉丝数下限（0 = 不查）
       const [mention, setMention] = React.useState(null)
       const [mentionUid, setMentionUid] = React.useState(null)
       const [mentionInfo, setMentionInfo] = React.useState(null)   // { name, face, level } 或 { error }
@@ -873,13 +879,18 @@ window.__ModuleLoader__.load({
         if (cfg && runsPerDay === null) setRunsPerDay(String(cfg.autoRunsPerDay ?? 6))
         if (cfg && gapMin === null) setGapMin(String(cfg.autoGapMinutes ?? 60))
         if (cfg && pvOnly === null) setPvOnly(Boolean(cfg.peakValleyOnly))
-        if (cfg && pickPerRound === null) setPickPerRound(String(cfg.perRoundMax ?? 3))
-        if (cfg && pickPerDay === null) setPickPerDay(String(cfg.perDayMax ?? 18))
+        if (cfg && pickPerRound === null) setPickPerRound(String(cfg.perRoundMax ?? 5))
+        if (cfg && pickPerDay === null) setPickPerDay(String(cfg.perDayMax ?? 30))
         if (cfg && transCap === null) setTransCap(String(cfg.transcribePerDay ?? 10))
         if (cfg && minDur === null) setMinDur(String(cfg.minDurationMin ?? 0))
         if (cfg && maxDur === null) setMaxDur(String(cfg.maxDurationMin ?? 60))
         if (cfg && preferSub === null) setPreferSub(cfg.preferSubtitle !== false)
         if (cfg && probeMax === null) setProbeMax(String(cfg.subtitleProbeMax ?? 3))
+        if (cfg && sourceMode === null) setSourceMode(String(cfg.sourceMode ?? 'feed'))
+        if (cfg && filterAds === null) setFilterAds(cfg.filterAds !== false)
+        if (cfg && filterSpam === null) setFilterSpam(cfg.filterSpam !== false)
+        if (cfg && blockWords === null) setBlockWords((cfg.blockWords || []).join('\n'))
+        if (cfg && minUpFans === null) setMinUpFans(String(cfg.minUpFans ?? 0))
         if (cfg && likePerRound === null) setLikePerRound(String(cfg.likePerRound ?? 1))
         if (cfg && likePerDay === null) setLikePerDay(String(cfg.likePerDay ?? 3))
         if (cfg && likeRule === null) setLikeRule(String(cfg.likeRule ?? 'standard'))
@@ -1412,14 +1423,14 @@ window.__ModuleLoader__.load({
          * 新模型：autoRun 是主开关；「只在谷时跑」降级成一个可选项。
          * 排班规则：每小时最多 1 轮（间隔可调）、每天最多 N 轮、每天最多挑 M 条。 */
 
-        /* 上限提醒：配置有风险时顶部提示 */
+        /* 上限提醒：配置有风险时顶部提示（2026-10-30 随配额抬升一起调：默认 5/30 不该报警） */
         (() => {
           const warns = []
           const dm = Number(pickPerDay) || 0
           const pr = Number(pickPerRound) || 0
           const rd = Number(runsPerDay) || 0
-          if (dm > 24) warns.push(`每天 ${dm} 条 ⇒ 平均每 ${Math.max(1, Math.round(1440 / dm))} 分钟发一条评论。B站 对高频评论 + 固定 @ 同一人有明确的反垃圾识别，小号很可能当天被封。`)
-          if (pr > 5) warns.push(`每轮 ${pr} 条偏多 —— 单轮越久，转写和判断成本越高。`)
+          if (dm > 60) warns.push(`每天 ${dm} 条 ⇒ 平均每 ${Math.max(1, Math.round(1440 / dm))} 分钟处理一条视频，成本高；要是还开着评论，B站 对高频评论 + 固定 @ 同一人有明确的反垃圾识别，小号很可能当天被封。`)
+          if (pr > 10) warns.push(`每轮 ${pr} 条偏多 —— 单轮越久，转写和判断成本越高。`)
           if (rd > 12) warns.push(`每天 ${rd} 轮 ⇒ 平均每 ${Math.max(1, Math.round(1440 / rd))} 分钟跑一轮，机器基本没有空闲。`)
           if (!warns.length) return null
           return h('div', { 'data-bd-guide': '', 'data-warn-guide': '' },
@@ -1467,19 +1478,19 @@ window.__ModuleLoader__.load({
               label: '每轮最多挑几条',
               hint: '0 = 只跑不挑',
             }, h('input', {
-              'data-bd-input': '', 'data-bd-w-num': '', type: 'number', min: 0, max: 20,
+              'data-bd-input': '', 'data-bd-w-num': '', type: 'number', min: 0, max: 30,
               value: pickPerRound ?? '',
               onChange: (e) => setPickPerRound(e.target.value),
-              onBlur: () => { const n = Math.max(0, Math.min(Number(pickPerRound) || 0, 20)); setPickPerRound(String(n)); patch({ perRoundMax: n }, '每轮最多挑几条') },
+              onBlur: () => { const n = Math.max(0, Math.min(Number(pickPerRound) || 0, 30)); setPickPerRound(String(n)); patch({ perRoundMax: n }, '每轮最多挑几条') },
             })),
             h(Row, {
               label: '每天最多挑几条',
               hint: '全天上限',
             }, h('input', {
-              'data-bd-input': '', 'data-bd-w-num': '', type: 'number', min: 0, max: 120,
+              'data-bd-input': '', 'data-bd-w-num': '', type: 'number', min: 0, max: 240,
               value: pickPerDay ?? '',
               onChange: (e) => setPickPerDay(e.target.value),
-              onBlur: () => { const n = Math.max(0, Math.min(Number(pickPerDay) || 0, 120)); setPickPerDay(String(n)); patch({ perDayMax: n }, '每天最多挑几条') },
+              onBlur: () => { const n = Math.max(0, Math.min(Number(pickPerDay) || 0, 240)); setPickPerDay(String(n)); patch({ perDayMax: n }, '每天最多挑几条') },
             }))),
           h(Row, {
             label: '每天最多转写几次',
@@ -1492,6 +1503,24 @@ window.__ModuleLoader__.load({
           })),
           h('div', { 'data-bd-row-desc': '' },
             `今天已转写 ${st.asrUsedToday ?? 0} 次${Number(transCap) > 0 ? ' / 上限 ' + transCap : ''} · 今天跑了 ${st.roundsToday ?? 0} 轮`)),
+
+        h(Divider),
+
+        h(Card, { title: '内容来源', desc: '决定每轮从哪拿候选视频（2026-10-30 起不再只能按关键词搜）' },
+          h(Row, {
+            label: '刷什么',
+            hint: '推荐流 = B站按这个账号的口味个性化推的（要登录）',
+          }, h('select', {
+            'data-bd-select': '', 'data-bd-w-md': '', value: sourceMode ?? 'feed',
+            onChange: (e) => { setSourceMode(e.target.value); patch({ sourceMode: e.target.value }, '内容来源') },
+          },
+            h('option', { value: 'feed' }, '只看推荐流'),
+            h('option', { value: 'mixed' }, '推荐为主 + 关键词补充'),
+            h('option', { value: 'search' }, '只按关键词搜（旧行为）'))),
+          String(sourceMode ?? 'feed') === 'feed' ? h('div', { 'data-bd-row-desc': '' },
+            '机器人替你刷首页「推荐」：B站推什么它看什么，下面的「检索关键词」这一档用不上。') : null,
+          String(sourceMode ?? 'feed') === 'mixed' ? h('div', { 'data-bd-row-desc': '' },
+            '先拉推荐流；配额还剩很多时，再用下面的「检索关键词」补一轮搜索。') : null),
 
         h(Divider),
 
@@ -1528,7 +1557,44 @@ window.__ModuleLoader__.load({
               value: probeMax ?? '',
               onChange: (e) => setProbeMax(e.target.value),
               onBlur: () => { const n = Math.max(1, Math.min(Number(probeMax) || 3, 10)); setProbeMax(String(n)); patch({ subtitleProbeMax: n }, '最多查几条字幕') },
-            }))) : null),
+            }))) : null,
+          /* ── 广告 / 引流过滤（2026-10-30）：在 MCP 工具层确定性过滤，零 token —— 被挡的候选不下发 ── */
+          h(Divider),
+          h(SwitchRow, {
+            label: '挡明显广告',
+            hint: '优惠/秒杀/带货/广告合作…标题或简介命中就跳过',
+            on: filterAds !== false,
+            onChange: (v) => { setFilterAds(v); patch({ filterAds: v }, '挡明显广告') },
+          }),
+          h(SwitchRow, {
+            label: '挡引流小号',
+            desc: '「分享资源」的小号：简介带网盘/短链/联系方式，或简介只有一条裸链接',
+            on: filterSpam !== false,
+            onChange: (v) => { setFilterSpam(v); patch({ filterSpam: v }, '挡引流小号') },
+          }),
+          h(StackRow, {
+            label: '自定义屏蔽词',
+            hint: '每行一个；标题/简介/UP 名命中即跳过（上面两个开关全关时也生效）',
+          }, h('textarea', {
+            'data-bd-textarea': '', rows: 3,
+            placeholder: '每行一个（留空 = 不加自定义词）',
+            value: blockWords ?? '',
+            onChange: (e) => setBlockWords(e.target.value),
+            onBlur: () => {
+              const list = String(blockWords ?? '').split('\n').map((s) => s.trim()).filter(Boolean)
+              if (list.join('\n') === (cfg?.blockWords || []).join('\n')) return
+              patch({ blockWords: list }, '自定义屏蔽词')
+            },
+          })),
+          h(Row, {
+            label: 'UP 粉丝数下限',
+            hint: '低于就跳过；0 = 不查（查了要多调接口，容易误杀新 UP）',
+          }, h('input', {
+            'data-bd-input': '', 'data-bd-w-num': '', type: 'number', min: 0, max: 1000000,
+            value: minUpFans ?? '',
+            onChange: (e) => setMinUpFans(e.target.value),
+            onBlur: () => { const n = Math.max(0, Math.min(Number(minUpFans) || 0, 1000000)); setMinUpFans(String(n)); patch({ minUpFans: n }, 'UP 粉丝数下限') },
+          }))),
 
         h(Divider),
 

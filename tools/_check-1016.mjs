@@ -205,7 +205,7 @@ ok(/if \(host\.ok \|\| host\.noForm\) markSyncFailed/.test(idx), '写成功（�
 //    2026-10-20 实测：绑错后该框显示的是 commentPerRound，而且一失焦就把评论上限的数写进 perRoundMax
 ok(cli.includes("value: pickPerRound ?? ''"), '「每轮最多挑几条」输入框没绑 pickPerRound')
 ok(!cli.includes('Number(perRound) || 0)); setPerRound(String(n)); patch({ perRoundMax: n })'), '「每轮最多挑几条」又绑回 perRound 了（会串到每轮评论上限）')
-ok(cli.includes("if (cfg && pickPerRound === null) setPickPerRound(String(cfg.perRoundMax ?? 3))"), 'pickPerRound 没从 perRoundMax 回填')
+ok(cli.includes("if (cfg && pickPerRound === null) setPickPerRound(String(cfg.perRoundMax ?? 5))"), 'pickPerRound 没从 perRoundMax 回填')
 ok(cli.includes("if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))"), 'perRound 没从 commentPerRound 回填')
 
 // ⑲ noForm（这个部署没有可写的 DSH 设置表单）不能算同步失败
