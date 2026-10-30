@@ -19,7 +19,7 @@ tree = ast.parse(SRC.read_text(encoding="utf-8"), filename=str(SRC))
 wanted = {
     "_ADS_WORDS", "_RESOURCE_WORDS", "_NETDISK_WORDS", "_CONTACT_WORDS",
     "_SHORTLINK_HOSTS", "_SPAM_TLDS", "_URL_TRUSTED_HOSTS", "_URL_RE",
-    "_url_hosts", "_screen_video", "_sec_to_dur",
+    "_url_hosts", "_screen_video", "_sec_to_dur", "_feed_items",
 }
 nodes = []
 for node in tree.body:
@@ -89,4 +89,16 @@ assert dur(3725) == "1:02:05", dur(3725)
 assert dur(45) == "0:45", dur(45)
 assert dur(None) == "0:00", dur(None)
 
-print(f"[OK] feed filter tests: {len(passed) + len(ads_cases) + len(spam_cases) + 5} cases")
+# ── 5. 推荐流响应归一（_feed_items）：两种口径 + 广告卡过滤 ──
+feed_items = ns["_feed_items"]
+video = lambda bv, goto=None: {"bvid": bv, "title": "t", **({"goto": goto} if goto else {})}
+# 老口径：data 直接是数组；无 goto 的普通卡要收，广告卡(cm)/番剧卡要丢，没 bvid 的要丢
+old_style = [video("BV1old1"), video("BVad", "cm"), video("BVbg", "bangumi"), {"title": "no bvid"}, "垃圾条目"]
+got = feed_items(old_style)
+assert [v["bvid"] for v in got] == ["BV1old1"], f"老口径归一不对：{got}"
+# 新口径：{"items": [...]}，goto=av 的收
+new_style = {"items": [video("BVnew1", "av"), video("BVnew2", "av")]}
+assert [v["bvid"] for v in feed_items(new_style)] == ["BVnew1", "BVnew2"], "新口径归一不对"
+assert feed_items(None) == [] and feed_items(42) == [] and feed_items({}) == [], "异常输入应给空列表"
+
+print(f"[OK] feed filter tests: {len(passed) + len(ads_cases) + len(spam_cases) + 10} cases")

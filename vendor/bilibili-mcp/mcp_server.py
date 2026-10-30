@@ -22,10 +22,11 @@ B站数据采集 MCP 服务，支持 OpenClaw / Claude Code / Cursor / Cline
 #      ⑨ 新增 `bili_like` / `bili_fav`：Video 只给了 like/has_liked，收藏得走原始 HTTP（`_bili_api`）
 #      ⑩ `_comment_state()` 单查评论存活：`bili_reply` 发送前、`bili_circle_reply` 找不到目标时用它分清
 #         「已删」和「掉出前 100 条窗口」，不再把两种原因混成一句话
-#      ⑪ 新增 `bili_feed` + `_screen_video()` + `_wbi_get()`：首页「推荐」流来源（wbi 签名直打
-#         web 接口，个性化靠登录态）；`_screen_video()` 在 MCP 层做确定性过滤（广告 / 引流小号 /
-#         短链简介），被挡的视频不下发给模型 —— 零 token 成本；过滤开关与屏蔽词由宿主经
-#         env 下发（BILI_FILTER_ADS / BILI_FILTER_SPAM / BILI_FILTER_WORDS / BILI_FILTER_MIN_FANS）
+#      ⑪ 新增 `bili_feed` + `_screen_video()`：首页「推荐」流来源（`x/web-interface/index/top`，
+#         个性化靠登录态；wbi 签名只作 -403/-412 时的兜底重试）+ `_screen_video()` 在 MCP 层做
+#         确定性过滤（广告 / 引流小号 / 短链简介），被挡的视频不下发给模型 —— 零 token 成本；
+#         过滤开关与屏蔽词由宿主经 env 下发（BILI_FILTER_ADS / BILI_FILTER_SPAM / BILI_FILTER_WORDS /
+#         BILI_FILTER_MIN_FANS）
 #      ⑫ `bili_search` 加 `filter` 参数：与 `bili_feed` 共用同一套过滤（默认值同样来自 env）
 import asyncio
 import json
@@ -662,6 +663,34 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank",
 
 # ========== Tool 1b: 首页推荐流 ==========
 
+def _feed_items(data):
+    """首页推荐返回的 data 归一成「普通视频卡」列表（纯函数，可测）。
+
+    ⚠️ 2026-10-30 实测两种口径都存在：
+      · 匿名/老口径：data 直接是数组（一次回一大包，ps 参数被无视）；
+      · 登录/新口径：{"items": [...]}。
+    条目在老口径下**没有 goto 字段** ⇒ 不能拿 goto=='av' 当必要条件：
+      · goto 存在且不是 'av' ⇒ 丢（cm=B站广告卡、bangumi/live 等另有所指）
+      · 没有 goto 但有 bvid ⇒ 收（普通视频卡）
+      · 连 bvid 都没有 ⇒ 丢
+    """
+    if isinstance(data, dict):
+        raw = data.get("items") or []
+    elif isinstance(data, list):
+        raw = data
+    else:
+        raw = []
+    out = []
+    for it in raw:
+        if not isinstance(it, dict) or not it.get("bvid"):
+            continue
+        goto = it.get("goto")
+        if goto and goto != "av":
+            continue
+        out.append(it)
+    return out
+
+
 @tool()
 async def bili_feed(pn: int = 1, ps: int = 20,
                     filter: bool | None = None, include_blocked: bool = False) -> str:
@@ -669,7 +698,7 @@ async def bili_feed(pn: int = 1, ps: int = 20,
     获取B站首页「推荐」流 —— 按当前登录账号的口味个性化推的（就是你在B站首页刷到的那种）。
 
     Args:
-        pn: 第几页（1 起）。翻页会往后拿更多推荐
+        pn: 第几页（1 起）。接口一次回一大包，这里在包内按页切
         ps: 每页数量，默认20，最大30
         filter: 是否过滤广告/引流视频（None = 按宿主设置来，默认开）
         include_blocked: True = 被过滤的视频也返回并带 blocked 原因（调试用，默认False）
@@ -682,24 +711,25 @@ async def bili_feed(pn: int = 1, ps: int = 20,
     cred = get_cred()
     ps = max(1, min(int(ps or 20), 30))
     pn = max(1, int(pn or 1))
-    mixin = await _wbi_keys(cred)
-    params = _wbi_sign({
-        "ps": ps,
-        "fresh_idx": pn * ps,
-        "fresh_idx_1h": pn * ps,
-        "fresh_idx_4h": pn * ps,
-    }, mixin)
-    resp = await _bili_api("GET", "https://api.bilibili.com/x/web-interface/wbi/index/top", cred, params=params)
-    if resp.get("code") != 0:
-        return json.dumps({"ok": False, "error": _risk_text(resp.get("code"), resp.get("message", ""))},
+    base = {"ps": ps, "fresh_idx": pn * ps, "fresh_idx_1h": pn * ps, "fresh_idx_4h": pn * ps}
+    url = "https://api.bilibili.com/x/web-interface/index/top"
+    # ⭐ 主路径不带 wbi 签名（2026-10-30 实测：带 wbi/ 前缀的那条 404，裸路径匿名也是 code 0）；
+    #    万一登录态下被要求签名（-403/-412），补一次 wbi 再试，别把兜底当摆设
+    resp = await _bili_api("GET", url, cred, params=base)
+    code = resp.get("code")
+    if code in (-403, -412) or (code == -1 and "HTTP 4" in str(resp.get("message", ""))):
+        mixin = await _wbi_keys(cred)
+        resp = await _bili_api("GET", url, cred, params=_wbi_sign(base, mixin))
+        code = resp.get("code")
+    if code != 0:
+        return json.dumps({"ok": False, "error": _risk_text(code, resp.get("message", ""))},
                           ensure_ascii=False)
-    items = (resp.get("data") or {}).get("items") or []
+    # 接口不理会 ps（实测一次回一大包）⇒ 按页在包内切
+    items = _feed_items(resp.get("data"))
+    window = items[(pn - 1) * ps: (pn - 1) * ps + ps]
 
     videos = []
-    for it in items:
-        # 只收普通视频卡：goto=av；cm 是B站自己的广告位、bangumi/live 等另有所指，全不要
-        if it.get("goto") not in ("av",) or not it.get("bvid"):
-            continue
+    for it in window:
         owner = it.get("owner") or {}
         stat = it.get("stat") or {}
         videos.append({
