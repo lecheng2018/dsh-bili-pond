@@ -789,6 +789,7 @@ window.__ModuleLoader__.load({
       const [minUpFans, setMinUpFans] = React.useState(null)    // UP 粉丝数下限（0 = 不查）
       const [allowWords, setAllowWords] = React.useState(null)  // 放行词/白名单（每行一个）
       const [pushUrl, setPushUrl] = React.useState(null)        // Bark 模板 / webhook 地址
+      const [pushHeaders, setPushHeaders] = React.useState(null) // webhook 自定义请求头
       const [pushChannel, setPushChannel] = React.useState(null) // off / bark / onebot / qqbot / webhook
       const [obUrl, setObUrl] = React.useState(null)            // OneBot HTTP 地址
       const [obToken, setObToken] = React.useState(null)        // OneBot access token（可空）
@@ -908,6 +909,7 @@ window.__ModuleLoader__.load({
         if (cfg && minUpFans === null) setMinUpFans(String(cfg.minUpFans ?? 0))
         if (cfg && allowWords === null) setAllowWords((cfg.allowWords || []).join('\n'))
         if (cfg && pushUrl === null) setPushUrl(String(cfg.pushUrl ?? ''))
+        if (cfg && pushHeaders === null) setPushHeaders(String(cfg.pushHeaders ?? ''))
         if (cfg && pushChannel === null) setPushChannel(String(cfg.pushChannel ?? 'off'))
         if (cfg && obUrl === null) setObUrl(String(cfg.onebotUrl ?? ''))
         if (cfg && obToken === null) setObToken(String(cfg.onebotToken ?? ''))
@@ -1732,7 +1734,7 @@ window.__ModuleLoader__.load({
             h('option', { value: 'bark' }, 'Bark（iOS）'),
             h('option', { value: 'onebot' }, 'QQ · OneBot / NapCat'),
             h('option', { value: 'qqbot' }, 'QQ · 官方机器人（手动填凭据）'),
-            h('option', { value: 'webhook' }, '自定义 Webhook'))),
+            h('option', { value: 'webhook' }, 'HTTP 代理推送（Webhook）'))),
           String(pushChannel ?? 'off') === 'bark' ? h(Row, {
             label: 'Bark 模板',
             hint: 'https://api.day.app/<key>/{title}/{body}',
@@ -1805,19 +1807,34 @@ window.__ModuleLoader__.load({
               onChange: (e) => setQqOpenidS(e.target.value),
               onBlur: () => { const v = String(qqOpenidS ?? '').trim(); if (v === String(cfg?.qqOpenid || '')) return; patch({ qqOpenid: v }, 'QQ 收件人 openid') },
             }))) : null,
-          String(pushChannel ?? 'off') === 'webhook' ? h(Row, {
-            label: 'Webhook 地址',
-            hint: '收 POST JSON {title, body} 的地址',
-          }, h('input', {
-            'data-bd-input': '', type: 'text', value: pushUrl ?? '',
-            placeholder: 'https://…',
-            onChange: (e) => setPushUrl(e.target.value),
-            onBlur: () => {
-              const v = String(pushUrl ?? '').trim()
-              if (v === String(cfg?.pushUrl || '')) return
-              patch({ pushUrl: v }, 'Webhook 地址')
-            },
-          })) : null,
+          String(pushChannel ?? 'off') === 'webhook' ? h('div', { 'data-bd-sub': '' },
+            h(Row, {
+              label: '推送地址',
+              hint: '收 POST JSON {title, body}；URL 里带 {title}/{body} 则按模板 GET',
+            }, h('input', {
+              'data-bd-input': '', type: 'text', value: pushUrl ?? '',
+              placeholder: 'https://你的转发服务/推送',
+              onChange: (e) => setPushUrl(e.target.value),
+              onBlur: () => {
+                const v = String(pushUrl ?? '').trim()
+                if (v === String(cfg?.pushUrl || '')) return
+                patch({ pushUrl: v }, '推送地址')
+              },
+            })),
+            h(StackRow, {
+              label: '自定义请求头',
+              hint: '每行一个 `Key: Value`，给转发服务做鉴权用（可留空）',
+            }, h('textarea', {
+              'data-bd-textarea': '', rows: 2,
+              placeholder: 'Authorization: Bearer xxx',
+              value: pushHeaders ?? '',
+              onChange: (e) => setPushHeaders(e.target.value),
+              onBlur: () => {
+                const v = String(pushHeaders ?? '')
+                if (v === String(cfg?.pushHeaders || '')) return
+                patch({ pushHeaders: v }, '自定义请求头')
+              },
+            }))) : null,
           h(Row, {
             label: '推送测试',
             hint: '发一条测试推送（字段失焦即保存，测的就是已保存的配置）',

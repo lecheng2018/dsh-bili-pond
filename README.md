@@ -232,7 +232,7 @@ DSH 插件、dsh 教程等）。每行一个，选词三条经验：
 | Bark（iOS） | 模板 `https://api.day.app/<key>/{title}/{body}` | 带 `{title}/{body}` 占位符按模板替换后请求 |
 | QQ · OneBot / NapCat | HTTP 地址 + 可选 token + 私聊 QQ 号 **或** 群号 | 会话自己定：私聊推给自己、群推给群里 |
 | QQ · 官方机器人 | AppID + AppSecret + 收件人 openid | ⚠️ 官方主动消息每用户每天限 4 条，日推够用；openid 从你 QQ bot 插件的日志里拿 |
-| 自定义 Webhook | 收 POST JSON `{title, body}` 的地址 | 钉钉 / 企业微信 / 自建服务都行 |
+| HTTP 代理推送（Webhook） | 推送地址 + 可选自定义请求头 | 收 POST JSON `{title, body}`（URL 带 `{title}/{body}` 则按模板 GET）；自建转发服务想转 QQ / 钉钉 / 任意渠道都行 |
 
 推送是 best-effort：失败只写日志，绝不影响值班本身。填完点「发一条测试推送」验证
 （不用跑整轮）；老配置只填过 pushUrl 的会自动当 Webhook 发，零迁移。

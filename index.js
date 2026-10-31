@@ -142,6 +142,8 @@ export const Config = !z ? undefined : z.object({
    *  · webhook = 任意收 POST JSON 的地址 */
   pushChannel: z.string().default('off').extra('volatile', true),
   pushUrl: z.string().default('').extra('volatile', true),
+  /** Webhook 附加请求头（每行一个 `Key: Value`），给自建转发服务做鉴权用 */
+  pushHeaders: z.string().default('').extra('volatile', true),
   onebotUrl: z.string().default('').extra('volatile', true),
   onebotToken: z.string().default('').extra('volatile', true),
   onebotTarget: z.string().default('').extra('volatile', true),
@@ -386,6 +388,7 @@ const pondAccount = async () => {
     noon: true, night: true, autoComment: false, circleMode: false, transcribe: false, asrModel: 'small',
     dmOn: false, dmMode: 'off', dmUid: 0,
     keywords: [], commentPerRound: 1, mentionName: '', mentionUid: 0, pythonPath: 'python', dshBin: '', headlessProfile: 'headless', dutyProvider: '', dutyModel: '', overlayMcp: true, reuseRoutes: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
+    pushHeaders: '',
     sourceMode: 'feed', sources: ['feed'], filterAds: true, filterSpam: true, blockWords: [], allowWords: [], minUpFans: 0,
     pushChannel: 'off', pushUrl: '', onebotUrl: '', onebotToken: '', onebotTarget: '', onebotGroup: '',
     qqAppId: '', qqAppSecret: '', qqOpenid: '',
@@ -455,6 +458,7 @@ const pondAccount = async () => {
     /* ── 2026-10-31 推送渠道 ── */
     if ('pushChannel' in p) p.pushChannel = ['off', 'bark', 'onebot', 'qqbot', 'webhook'].includes(String(p.pushChannel)) ? String(p.pushChannel) : 'off'
     if ('pushUrl' in p) p.pushUrl = String(p.pushUrl || '').trim().slice(0, 500)
+    if ('pushHeaders' in p) p.pushHeaders = String(p.pushHeaders || '').slice(0, 1500)
     if ('onebotUrl' in p) p.onebotUrl = String(p.onebotUrl || '').trim().slice(0, 300)
     if ('onebotToken' in p) p.onebotToken = String(p.onebotToken || '').trim().slice(0, 200)
     if ('onebotTarget' in p) p.onebotTarget = String(p.onebotTarget || '').trim().slice(0, 32)
@@ -2993,12 +2997,23 @@ const pondAccount = async () => {
       // 不带 msg_id = 主动消息：腾讯限制每用户每天 4 条 —— 日推一条够用
       return qqSend(appId, secret, openid, plain)
     }
-    // webhook（含老配置自动兼容）
+    // webhook = HTTP 代理推送（含老配置自动兼容）：
+    //  · URL 带 {title}/{body} 占位符 ⇒ 模板替换后 GET（任何「GET 一个 URL 就推」的服务都能接）
+    //  · 否则 POST JSON {title, body}，可带自定义请求头（pushHeaders，每行 `Key: Value`）
     const url = String(cfg.pushUrl || '').trim()
     if (!/^https?:\/\//i.test(url)) throw new Error('推送地址没填')
+    const headers = { 'content-type': 'application/json' }
+    for (const line of String(cfg.pushHeaders || '').split('\n')) {
+      const m = /^\s*([A-Za-z0-9_-]+)\s*:\s*(.+?)\s*$/.exec(line)
+      if (m) headers[m[1]] = m[2]
+    }
+    if (/\{title\}/.test(url) || /\{body\}/.test(url)) {
+      const filled = url.replaceAll('{title}', encodeURIComponent(title)).replaceAll('{body}', encodeURIComponent(body))
+      return fetch(filled, { headers, signal: AbortSignal.timeout(10_000) })
+    }
     return fetch(url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers,
       body: JSON.stringify({ title, body }),
       signal: AbortSignal.timeout(10_000),
     })
@@ -4018,7 +4033,7 @@ const pondAccount = async () => {
         // 2026-10-30 内容来源与过滤（推荐流 bili_feed / 广告引流过滤 / 自定义屏蔽词）
         'sourceMode', 'sources', 'filterAds', 'filterSpam', 'blockWords', 'allowWords', 'minUpFans',
         // 2026-10-31 推送渠道
-        'pushChannel', 'pushUrl', 'onebotUrl', 'onebotToken', 'onebotTarget', 'onebotGroup', 'qqAppId', 'qqAppSecret', 'qqOpenid',
+        'pushChannel', 'pushUrl', 'pushHeaders', 'onebotUrl', 'onebotToken', 'onebotTarget', 'onebotGroup', 'qqAppId', 'qqAppSecret', 'qqOpenid',
         // 2026-10-22 守护评论区（骑士团）
         'guardOn', 'guardWhitelist', 'guardOwnAll', 'guardDailyCap', 'guardScope', 'guardPerRound', 'guardPollMinutes', 'guardEmoji', 'guardTone',
         // 2026-10-25 点赞与收藏
