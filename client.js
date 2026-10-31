@@ -1731,12 +1731,8 @@ window.__ModuleLoader__.load({
             h('option', { value: 'off' }, '不推送'),
             h('option', { value: 'bark' }, 'Bark（iOS）'),
             h('option', { value: 'onebot' }, 'QQ · OneBot / NapCat'),
-            h('option', { value: 'qqbot-dsh' }, 'QQ · 复用 DSH 已绑定的机器人（推荐，零配置）'),
             h('option', { value: 'qqbot' }, 'QQ · 官方机器人（手动填凭据）'),
             h('option', { value: 'webhook' }, '自定义 Webhook'))),
-          String(pushChannel ?? 'off') === 'qqbot-dsh' ? h('div', { 'data-bd-row-desc': '' },
-            '自动复用 DSH 里已绑定的 QQ 机器人：appId / 密钥 / 收件人（绑定时登记的 openid）全部自动读取，什么都不用填。'
-            + '⚠️ 官方主动消息每用户每天限 4 条 —— 日推一条够用。想推给别的人，请用「官方机器人」档手动填 openid。') : null,
           String(pushChannel ?? 'off') === 'bark' ? h(Row, {
             label: 'Bark 模板',
             hint: 'https://api.day.app/<key>/{title}/{body}',
