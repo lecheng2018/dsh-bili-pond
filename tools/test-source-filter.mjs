@@ -150,7 +150,7 @@ console.log('=== ⑦ 推送渠道 qqbot-dsh 档（1.7.0） ===')
   const r = await call('POST', '/api/bili-pond/config', JSON.stringify({ pushChannel: 'qqbot-dsh' }))
   ok(r.config?.pushChannel === 'qqbot-dsh', 'pushChannel=qqbot-dsh 是合法档位', String(r.config?.pushChannel))
   const pt = await call('POST', '/api/bili-pond/push-test', '{}')
-  ok(pt?.ok === false && /没找到 DSH 已绑定/.test(pt?.error || ''), 'qqbot-dsh 无绑定配置时给人话报错', JSON.stringify(pt).slice(0, 90))
+  ok(pt?.ok === false && /没找到已绑定 QQ 机器人的可用凭据/.test(pt?.error || ''), 'qqbot-dsh 无绑定配置时给人话报错', JSON.stringify(pt).slice(0, 90))
   cleanup()
 }
 

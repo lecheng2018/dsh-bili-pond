@@ -1,5 +1,12 @@
 # 更新日志
 
+## 1.7.2（2026-10-31）
+
+- **修复 qqbot-dsh 渠道 100016**：密钥解析重写 —— 首选**宿主 cordis.patch.yml 里 qqbot 插件条目**
+  （appId / appSecret / c2cAllow 的收件人 openid，网关正在用的就是这一份；10-31 实测
+  integrations + 凭据库链路里的值过不了 QQ 校验），integrations + 凭据库降为兜底。
+  openid 覆盖顺序：手动填的 qqOpenid > 绑定登记的 ownerUserOpenid。
+
 ## 1.7.1（2026-10-31）
 
 - **移动端适配**：窄屏断点从 560/620 统一抬到 **720**（设置页容器本就 720 封顶，手机上

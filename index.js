@@ -2949,29 +2949,61 @@ const pondAccount = async () => {
       signal: AbortSignal.timeout(10_000),
     })
   }
-  /* ⭐ qqbot-dsh 渠道（1.7.0）：复用 DSH 里**已经绑定**的 QQ 机器人，零配置 ——
-   *    appId / 收件人 openid 读 `integrations/dsh-qq/config.json`（ownerUserOpenid），
-   *    secret 按 secretRef 从 `.credentials.yaml` 的 refs 里解析。 */
-  const resolveDshQqBot = () => {
-    const home = dirname(stateDir)
-    let bot = null
-    try {
-      const j = JSON.parse(readFileSync(join(home, 'integrations', 'dsh-qq', 'config.json'), 'utf8'))
-      bot = (Array.isArray(j?.bots) && j.bots[0]) || null
-    } catch { /* 没装 QQ 集成 */ }
-    if (!bot?.appId || !bot?.secretRef) {
-      throw new Error('没找到 DSH 已绑定的 QQ 机器人（integrations/dsh-qq/config.json 不存在或没绑定过）')
+  /* ⭐ qqbot-dsh 渠道（1.7.0 → 1.7.2 重写解析）：复用 DSH 里**已经绑定**的 QQ 机器人，零配置。
+   *    凭据来源（按序）：
+   *    ① 宿主 cordis.patch.yml 的 qqbot 插件条目（如 zhoukai-qqbot）—— appId / appSecret /
+   *       c2cAllow 里的收件人 openid 都在（网关正在用的就是这一份，最可靠；10-31 实测
+   *       integrations 链路里 credentials.yaml 存的值过不了 QQ 校验，报 100016）；
+   *    ② 兜底：integrations/dsh-qq/config.json（appId/ownerUserOpenid）+ .credentials.yaml
+   *       refs[secretRef]（另一部分部署把密钥存这里）。
+   *    openid 覆盖：设置里 qqOpenid 填了就优先用它（推给别的人）。 */
+  const parseQqBotFromPatch = (text) => {
+    let cur = null
+    const found = []
+    for (const line of String(text || '').split('\n')) {
+      const idm = /^(\s*)- id:\s*(.+?)\s*$/.exec(line)
+      if (idm) {
+        if (cur && cur.secret) found.push(cur)
+        cur = /qqbot/i.test(idm[2]) ? { appId: '', secret: '', openid: '' } : null
+        continue
+      }
+      if (!cur) continue
+      if (line.trim() && (line.match(/^\s*/) || [''])[0].length === 0) {
+        if (cur.secret) found.push(cur)
+        cur = null
+        continue
+      }
+      let m = /^\s*appId:\s*["']?([^"'\s]+)["']?\s*$/.exec(line)
+      if (m) { cur.appId = m[1]; continue }
+      m = /^\s*appSecret:\s*["']?([^"'\s]+)["']?\s*$/.exec(line)
+      if (m) { cur.secret = m[1]; continue }
+      m = /^\s*-\s*([0-9A-Fa-f]{32})\s*$/.exec(line)
+      if (m && !cur.openid) { cur.openid = m[1]; continue }
     }
-    const openid = String(cfg.qqOpenid || '').trim() || String(bot.ownerUserOpenid || '').trim()
-    if (!openid) throw new Error('绑定配置里没有收件人 openid —— 请在「QQ · 官方机器人」档手动填')
-    let secret = ''
+    if (cur && cur.secret) found.push(cur)
+    return found[0] || null
+  }
+  const resolveDshQqBot = () => {
+    // ① 宿主 patch 的 qqbot 插件条目（appId/appSecret/c2cAllow 里的 openid）
+    let fromPatch = null
+    try { fromPatch = parseQqBotFromPatch(readFileSync(hostPatchFile(), 'utf8')) } catch { /* 读不到走兜底 */ }
+    // ② 兜底：integrations + 凭据库
+    let fromIntegration = null
     try {
-      const t = readFileSync(join(home, '.credentials.yaml'), 'utf8')
-      const m = new RegExp('^\\s*' + String(bot.secretRef).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:\\s*["\']?([^"\'\\r\\n]+)', 'm').exec(t)
-      secret = (m?.[1] || '').trim()
-    } catch { /* 读不到走下面的报错 */ }
-    if (!secret) throw new Error('secretRef（' + bot.secretRef + '）在凭据库里没解析到')
-    return { appId: String(bot.appId), secret, openid }
+      const home = dirname(stateDir)
+      const j = JSON.parse(readFileSync(join(home, 'integrations', 'dsh-qq', 'config.json'), 'utf8'))
+      const bot = (Array.isArray(j?.bots) && j.bots[0]) || null
+      if (bot?.appId && bot?.secretRef) {
+        const t = readFileSync(join(home, '.credentials.yaml'), 'utf8')
+        const m = new RegExp('^\\s*' + String(bot.secretRef).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:\\s*["\']?([^"\'\\r\\n]+)', 'm').exec(t)
+        fromIntegration = { appId: String(bot.appId), secret: (m?.[1] || '').trim(), openid: String(bot.ownerUserOpenid || '').trim() }
+      }
+    } catch { /* 没装 QQ 集成 */ }
+    const src = fromPatch?.secret ? fromPatch : (fromIntegration?.secret ? fromIntegration : null)
+    if (!src) throw new Error('没找到已绑定 QQ 机器人的可用凭据（宿主 patch 里没有带 appSecret 的 qqbot 条目，凭据库兜底也没命中）')
+    const openid = String(cfg.qqOpenid || '').trim() || String(src.openid || '').trim()
+    if (!openid) throw new Error('凭据里没有收件人 openid —— 请在「QQ · 官方机器人」档手动填一个')
+    return { appId: src.appId, secret: src.secret, openid }
   }
   const sendPush = async (title, body) => {
     const ch = effectivePushChannel()
