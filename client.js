@@ -1711,7 +1711,23 @@ window.__ModuleLoader__.load({
               if (v === String(cfg?.pushUrl || '')) return
               patch({ pushUrl: v }, '推送 Webhook')
             },
-          }))),
+          })),
+          h(Row, {
+            label: '推送测试',
+            hint: '发一条测试推送 —— 手机收到了才算通（不用跑整轮）',
+          }, h('button', {
+            'data-bd-btn': '', disabled: Boolean(busy),
+            onClick: async () => {
+              setBusy('push-test')
+              try {
+                // 输入框里改了还没失焦保存的话，直接把草稿递过去测，省一步
+                const v = String(pushUrl ?? '').trim()
+                const r = await jpost('/push-test', v && v !== String(cfg?.pushUrl || '') ? { url: v } : {})
+                if (r?.ok) say('测试推送已发出 —— 看看手机收到了没', 'good')
+                else say('测试推送失败：' + (r?.error || 'HTTP ' + (r?.status ?? '?')), 'warn')
+              } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+            },
+          }, '发一条测试推送'))),
 
         /* ══ ⑦ 发布与互动 ══════════════════════════════════════════════
        * ⭐ 2026-10-20 合并：原来「自动发布评论」和「回复楼中楼」是两个独立开关，

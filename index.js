@@ -2871,6 +2871,21 @@ const pondAccount = async () => {
    *    · URL 里带 {title}/{body} 占位符 ⇒ 模板替换后 GET（**Bark 风格**：https://api.day.app/<key>/{title}/{body}）
    *    · 没占位符 ⇒ POST JSON {title, body}（钉钉 / 企业微信 / QQ bot 桥都能接）
    *    🔴 best-effort：失败只记日志，绝不影响值班本身。 */
+  const sendPush = async (url, title, body) => {
+    let r
+    if (/\{title\}/.test(url) || /\{body\}/.test(url)) {
+      const filled = url.replaceAll('{title}', encodeURIComponent(title)).replaceAll('{body}', encodeURIComponent(body))
+      r = await fetch(filled, { signal: AbortSignal.timeout(10_000) })
+    } else {
+      r = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ title, body }),
+        signal: AbortSignal.timeout(10_000),
+      })
+    }
+    return r
+  }
   const pushRoundDigest = async (picks, tookSec) => {
     const url = String(cfg.pushUrl || '').trim()
     if (!url || !/^https?:\/\//i.test(url)) return
@@ -2880,18 +2895,7 @@ const pondAccount = async () => {
       ? picks.slice(0, 10).map((e, i) => `${i + 1}. ${e.title || e.bvid}\nhttps://www.bilibili.com/video/${e.bvid}`).join('\n\n')
       : `这一轮跑完了（用时 ${fmtDur(tookSec)}），没有值得推给你的新视频。`
     try {
-      let r
-      if (/\{title\}/.test(url) || /\{body\}/.test(url)) {
-        const filled = url.replaceAll('{title}', encodeURIComponent(title)).replaceAll('{body}', encodeURIComponent(body))
-        r = await fetch(filled, { signal: AbortSignal.timeout(10_000) })
-      } else {
-        r = await fetch(url, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ title, body }),
-          signal: AbortSignal.timeout(10_000),
-        })
-      }
+      const r = await sendPush(url, title, body)
       log(`推送${r.ok ? '成功' : '失败（HTTP ' + r.status + '）'} · ${n} 条`)
     } catch (e) {
       log(`推送失败（不影响值班）：${e?.message ?? e}`)
@@ -3808,6 +3812,22 @@ const pondAccount = async () => {
       } catch { /* 还没过滤过任何东西 */ }
       items.reverse()   // 新的在前
       return sendJson(res, 200, { ok: true, items })
+    }
+
+    /* ⭐ 推送测试（2026-10-31）：不用跑整轮就能验证 webhook 通不通 —— 传 url 就测 url，没传测已存的 */
+    if (req.method === 'POST' && path === '/api/bili-pond/push-test') {
+      const body = await readBody(req)
+      const url = String((body && body.url) || cfg.pushUrl || '').trim()
+      if (!url || !/^https?:\/\//i.test(url)) {
+        return sendJson(res, 200, { ok: false, error: '先在「日报」卡片里填推送 Webhook（以 https:// 开头）' })
+      }
+      try {
+        const r = await sendPush(url, '🐟 鱼塘推送测试', '这是一条测试推送 —— 看到它说明 webhook 通了，之后每轮挑中的视频都会这样推过来。')
+        log(`测试推送${r.ok ? '成功' : '失败（HTTP ' + r.status + '）'}`)
+        return sendJson(res, 200, { ok: r.ok, status: r.status, error: r.ok ? '' : `HTTP ${r.status} —— 看看 URL 格式对不对（Bark 记得带 {title}/{body} 占位符）` })
+      } catch (e) {
+        return sendJson(res, 200, { ok: false, error: String(e?.message ?? e) })
+      }
     }
 
     if (req.method === 'GET' && path === '/api/bili-pond/pond') {
