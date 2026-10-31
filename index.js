@@ -2946,7 +2946,7 @@ const pondAccount = async () => {
   }
   const qqSend = async (appId, secret, openid, plain) => {
     const tok = await qqBotToken(appId, secret)
-    return fetch(`https://api.sgroup.qq.com/users/${openid}/messages`, {
+    return fetch(`https://api.sgroup.qq.com/v2/users/${openid}/messages`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', Authorization: 'QQBot ' + tok },
       body: JSON.stringify({ content: plain, msg_type: 0, msg_seq: 1 }),
