@@ -417,23 +417,27 @@ window.__ModuleLoader__.load({
 /* 中号控件不再写死 230px：按内容宽度走，免得选项文字被截断成「普通评论 —— 在选中的…」 */
 [data-bd-w-md]{width:auto;min-width:170px;max-width:100%;}
 
-@media (max-width:620px){
+@media (max-width:720px){
   [data-bd-pair]{grid-template-columns:minmax(0,1fr);gap:0;}
-}
-
-/* ══ 窄屏 ═══════════════════════════════════════════════════════════════ */
-@media (max-width:560px){
+  [data-bd-pair] > [data-bd-row]{border-top:1px solid var(--bd-line);}
+  [data-bd-pair] > [data-bd-row]:first-child{border-top:0;}
   [data-bd-metrics]{grid-template-columns:1fr 1fr;}
   [data-bd-metric]:nth-child(3){border-left:0;}
   [data-bd-metric]:nth-child(n+3){border-top:1px solid var(--bd-line);}
+  [data-bd-metric]{padding:9px 12px 10px;}
   [data-bd-row]{align-items:flex-start;gap:8px 12px;}
   [data-bd-row-main]{flex-basis:100%;}
   [data-bd-row-ctl]{width:100%;justify-content:flex-start;margin-left:0;}
   [data-bd-inline]{justify-content:flex-start;}
   [data-bd-card-body]{padding-left:14px;padding-right:14px;}
   [data-bd-card-head]{padding-left:14px;padding-right:14px;}
-  [data-bd-w-sm],[data-bd-w-md]{width:100%;}
+  [data-bd-w-sm],[data-bd-w-md],[data-bd-select],[data-bd-textarea]{width:100%;}
+  [data-bd-w-num]{width:88px;}
   [data-bd-btns] [data-bd-btn]{flex:1 1 auto;}
+  [data-bd-btn]{min-height:32px;}
+  [data-bd-sub]{padding-left:10px;}
+  [data-bd-md] table{display:block;width:max-content;max-width:100%;overflow-x:auto;}
+  [data-bd-logfold] pre{white-space:pre-wrap;word-break:break-all;}
 }
 `
 
