@@ -144,13 +144,13 @@ console.log('=== ⑥ sources 多选（1.7.0）：老配置迁移 + 钳制 ===')
   cleanup()
 }
 
-console.log('=== ⑦ 推送渠道 qqbot-dsh 档（1.7.0） ===')
+console.log('=== ⑦ 推送渠道：qqbot-dsh 已废弃（1.7.3 移除，钳回 off） ===')
 {
   const { call, cleanup } = await loadWith({})
   const r = await call('POST', '/api/bili-pond/config', JSON.stringify({ pushChannel: 'qqbot-dsh' }))
-  ok(r.config?.pushChannel === 'qqbot-dsh', 'pushChannel=qqbot-dsh 是合法档位', String(r.config?.pushChannel))
+  ok(r.config?.pushChannel === 'off', 'qqbot-dsh 已移除 ⇒ 钳回 off', String(r.config?.pushChannel))
   const pt = await call('POST', '/api/bili-pond/push-test', '{}')
-  ok(pt?.ok === false && /没找到已绑定 QQ 机器人的可用凭据/.test(pt?.error || ''), 'qqbot-dsh 无绑定配置时给人话报错', JSON.stringify(pt).slice(0, 90))
+  ok(pt?.ok === false, '渠道未配置 ⇒ 测试推送给人话报错', JSON.stringify(pt).slice(0, 90))
   cleanup()
 }
 
