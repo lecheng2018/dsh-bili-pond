@@ -779,7 +779,6 @@ window.__ModuleLoader__.load({
       const [preferSub, setPreferSub] = React.useState(null)    // 字幕优先
       const [probeMax, setProbeMax] = React.useState(null)      // 最多查几条字幕
       /* 内容来源与过滤（2026-10-30 重构）：同样绑本地草稿，防 /status 轮询冲掉输入 */
-      const [sourceMode, setSourceMode] = React.useState(null)  // feed / mixed / search
       const [filterAds, setFilterAds] = React.useState(null)    // 挡明显广告
       const [filterSpam, setFilterSpam] = React.useState(null)  // 挡引流小号
       const [blockWords, setBlockWords] = React.useState(null)  // 自定义屏蔽词（每行一个）
@@ -899,7 +898,6 @@ window.__ModuleLoader__.load({
         if (cfg && maxDur === null) setMaxDur(String(cfg.maxDurationMin ?? 60))
         if (cfg && preferSub === null) setPreferSub(cfg.preferSubtitle !== false)
         if (cfg && probeMax === null) setProbeMax(String(cfg.subtitleProbeMax ?? 3))
-        if (cfg && sourceMode === null) setSourceMode(String(cfg.sourceMode ?? 'feed'))
         if (cfg && filterAds === null) setFilterAds(cfg.filterAds !== false)
         if (cfg && filterSpam === null) setFilterSpam(cfg.filterSpam !== false)
         if (cfg && blockWords === null) setBlockWords((cfg.blockWords || []).join('\n'))
@@ -951,6 +949,8 @@ window.__ModuleLoader__.load({
         n = Number(n) || 0
         return n >= 100_000_000 ? (n / 1e8).toFixed(1) + '亿' : n >= 10_000 ? (n / 1e4).toFixed(1) + '万' : String(n)
       }
+      /* 内容来源开关（1.7.0 多选）：直接读 cfg，点一下 patch 一次 —— 开关不需要草稿态 */
+      const srcOn = (k) => (Array.isArray(cfg?.sources) && cfg.sources.length ? cfg.sources : ['feed']).includes(k)
 
       /* 今日点赞 / 收藏计数：跟 /status 同频（5 秒）拉一次 —— 指标栏和历史页共用这一份口径 */
       React.useEffect(() => {
@@ -1565,24 +1565,24 @@ window.__ModuleLoader__.load({
 
         h(Divider),
 
-        h(Card, { title: '内容来源', desc: '决定每轮从哪拿候选视频（2026-10-30 起不再只能按关键词搜）' },
-          h(Row, {
-            label: '刷什么',
-            hint: '推荐流 = B站按这个账号的口味个性化推的（要登录）',
-          }, h('select', {
-            'data-bd-select': '', 'data-bd-w-md': '', value: sourceMode ?? 'feed',
-            onChange: (e) => { setSourceMode(e.target.value); patch({ sourceMode: e.target.value }, '内容来源') },
-          },
-            h('option', { value: 'feed' }, '只看推荐流'),
-            h('option', { value: 'follow' }, '只看关注动态'),
-            h('option', { value: 'mixed' }, '推荐为主 + 关键词补充'),
-            h('option', { value: 'search' }, '只按关键词搜（旧行为）'))),
-          String(sourceMode ?? 'feed') === 'feed' ? h('div', { 'data-bd-row-desc': '' },
-            '机器人替你刷首页「推荐」：B站推什么它看什么，下面的「检索关键词」这一档用不上。') : null,
-          String(sourceMode ?? 'feed') === 'follow' ? h('div', { 'data-bd-row-desc': '' },
-            '机器人替你刷「关注动态」：你关注的 UP 一发新视频它就看到（要登录且有关注）。') : null,
-          String(sourceMode ?? 'feed') === 'mixed' ? h('div', { 'data-bd-row-desc': '' },
-            '先拉推荐流；配额还剩很多时，再用下面的「检索关键词」补一轮搜索。') : null),
+        h(Card, { title: '内容来源', desc: '开几个就都拉：候选合并后统一判重挑选（至少开一个）' },
+          ...['feed', 'follow', 'keywords'].map((k) => h(SwitchRow, {
+            key: k,
+            label: k === 'feed' ? '推荐流' : k === 'follow' ? '关注动态' : '关键词搜索',
+            desc: k === 'feed' ? 'B站按这个账号的口味个性化推的（要登录）'
+              : k === 'follow' ? '你关注的 UP 一发新视频就看到（要登录且有关注）'
+              : '用下面的「检索关键词」搜（近 7 天优先）',
+            on: srcOn(k),
+            onChange: (v) => {
+              const cur = new Set(Array.isArray(cfg?.sources) && cfg.sources.length ? cfg.sources : ['feed'])
+              if (v) cur.add(k)
+              else {
+                cur.delete(k)
+                if (!cur.size) return   // 至少保留一个：全关等于不干活，直接不动
+              }
+              patch({ sources: [...cur] }, '内容来源')
+            },
+          }))),
 
         h(Divider),
 
@@ -1727,8 +1727,12 @@ window.__ModuleLoader__.load({
             h('option', { value: 'off' }, '不推送'),
             h('option', { value: 'bark' }, 'Bark（iOS）'),
             h('option', { value: 'onebot' }, 'QQ · OneBot / NapCat'),
-            h('option', { value: 'qqbot' }, 'QQ · 官方机器人'),
+            h('option', { value: 'qqbot-dsh' }, 'QQ · 复用 DSH 已绑定的机器人（推荐，零配置）'),
+            h('option', { value: 'qqbot' }, 'QQ · 官方机器人（手动填凭据）'),
             h('option', { value: 'webhook' }, '自定义 Webhook'))),
+          String(pushChannel ?? 'off') === 'qqbot-dsh' ? h('div', { 'data-bd-row-desc': '' },
+            '自动复用 DSH 里已绑定的 QQ 机器人：appId / 密钥 / 收件人（绑定时登记的 openid）全部自动读取，什么都不用填。'
+            + '⚠️ 官方主动消息每用户每天限 4 条 —— 日推一条够用。想推给别的人，请用「官方机器人」档手动填 openid。') : null,
           String(pushChannel ?? 'off') === 'bark' ? h(Row, {
             label: 'Bark 模板',
             hint: 'https://api.day.app/<key>/{title}/{body}',

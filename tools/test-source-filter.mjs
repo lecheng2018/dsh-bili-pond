@@ -130,5 +130,29 @@ console.log('\n=== ⑥ status 带漂移字段 ===')
   cleanup()
 }
 
+console.log('=== ⑥ sources 多选（1.7.0）：老配置迁移 + 钳制 ===')
+{
+  const { call, cleanup } = await loadWith({ sourceMode: 'mixed' })
+  const st = await call('GET', '/api/bili-pond/status')
+  const c = st.config
+  ok(JSON.stringify(c.sources) === JSON.stringify(['feed', 'keywords']), '老 sourceMode=mixed ⇒ sources=[feed,keywords]', JSON.stringify(c.sources))
+  const r = await call('POST', '/api/bili-pond/config', JSON.stringify({ sources: ['feed', 'follow', 'bogus', 'feed'] }))
+  const c2 = r.config || {}
+  ok(JSON.stringify(c2.sources) === JSON.stringify(['feed', 'follow']), 'sources 钳制：去非法值、去重', JSON.stringify(c2.sources))
+  const e = await call('POST', '/api/bili-pond/config', JSON.stringify({ sources: [] }))
+  ok(JSON.stringify(e.config?.sources) === JSON.stringify(['feed']), 'sources 全空 ⇒ 回 [feed]', JSON.stringify(e.config?.sources))
+  cleanup()
+}
+
+console.log('=== ⑦ 推送渠道 qqbot-dsh 档（1.7.0） ===')
+{
+  const { call, cleanup } = await loadWith({})
+  const r = await call('POST', '/api/bili-pond/config', JSON.stringify({ pushChannel: 'qqbot-dsh' }))
+  ok(r.config?.pushChannel === 'qqbot-dsh', 'pushChannel=qqbot-dsh 是合法档位', String(r.config?.pushChannel))
+  const pt = await call('POST', '/api/bili-pond/push-test', '{}')
+  ok(pt?.ok === false && /没找到 DSH 已绑定/.test(pt?.error || ''), 'qqbot-dsh 无绑定配置时给人话报错', JSON.stringify(pt).slice(0, 90))
+  cleanup()
+}
+
 console.log('\n' + (failures === 0 ? '全部通过 ✓' : failures + ' 项失败 ✗'))
 process.exit(failures === 0 ? 0 : 1)

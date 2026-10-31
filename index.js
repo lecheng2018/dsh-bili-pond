@@ -119,7 +119,10 @@ export const Config = !z ? undefined : z.object({
    *  · mixed  = 推荐为主，配额还剩时用关键词补
    *  · search = 旧行为，只按关键词搜
    *  过滤在 MCP 层做（确定性规则、零 token）：广告 / 引流小号 / 自定义屏蔽词。 */
-  /** 内容来源：feed（默认）/ follow / mixed / search */
+  /** 内容来源（多选，自由组合）：feed=推荐流 / follow=关注动态 / keywords=关键词搜索。
+   *  ⚠️ 老配置的 sourceMode（四档单选）会在 migrateCfg 里换算成这份（1.7.0 迁移）。 */
+  sources: z.array(z.string()).default(['feed']).extra('volatile', true),
+  /** @deprecated 1.7.0 前的四档单选，仅为老配置迁移保留，新代码一律读 sources */
   sourceMode: z.string().default('feed').extra('volatile', true),
   /** 挡明显广告（优惠/秒杀/带货/广告合作…标题或简介命中即跳过） */
   filterAds: z.boolean().default(true).extra('volatile', true),
@@ -383,7 +386,7 @@ const pondAccount = async () => {
     noon: true, night: true, autoComment: false, circleMode: false, transcribe: false, asrModel: 'small',
     dmOn: false, dmMode: 'off', dmUid: 0,
     keywords: [], commentPerRound: 1, mentionName: '', mentionUid: 0, pythonPath: 'python', dshBin: '', headlessProfile: 'headless', dutyProvider: '', dutyModel: '', overlayMcp: true, reuseRoutes: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
-    sourceMode: 'feed', filterAds: true, filterSpam: true, blockWords: [], allowWords: [], minUpFans: 0,
+    sourceMode: 'feed', sources: ['feed'], filterAds: true, filterSpam: true, blockWords: [], allowWords: [], minUpFans: 0,
     pushChannel: 'off', pushUrl: '', onebotUrl: '', onebotToken: '', onebotTarget: '', onebotGroup: '',
     qqAppId: '', qqAppSecret: '', qqOpenid: '',
     guardOn: false, guardWhitelist: '', guardOwnAll: true, guardDailyCap: 30, guardScope: 1, guardPerRound: 3, guardPollMinutes: 3, guardEmoji: true, guardTone: '',
@@ -439,13 +442,18 @@ const pondAccount = async () => {
     num('transcribePerDay', 0, 50, 10)       // 每日转写熔断
     /* ── 2026-10-30 内容来源与过滤 ── */
     if ('sourceMode' in p) p.sourceMode = ['feed', 'follow', 'mixed', 'search'].includes(String(p.sourceMode)) ? String(p.sourceMode) : 'feed'
+    if ('sources' in p) {
+      const legal = ['feed', 'follow', 'keywords']
+      const list = (Array.isArray(p.sources) ? p.sources : []).map((s) => String(s)).filter((s) => legal.includes(s))
+      p.sources = list.length ? [...new Set(list)] : ['feed']
+    }
     if ('filterAds' in p) p.filterAds = Boolean(p.filterAds)
     if ('filterSpam' in p) p.filterSpam = Boolean(p.filterSpam)
     if ('blockWords' in p) p.blockWords = Array.isArray(p.blockWords) ? p.blockWords.filter((x) => typeof x === 'string').map((s) => s.trim()).filter(Boolean) : []
     if ('allowWords' in p) p.allowWords = Array.isArray(p.allowWords) ? p.allowWords.filter((x) => typeof x === 'string').map((s) => s.trim()).filter(Boolean) : []
     num('minUpFans', 0, 1000000, 0)          // UP 粉丝数下限（0 = 不查）
     /* ── 2026-10-31 推送渠道 ── */
-    if ('pushChannel' in p) p.pushChannel = ['off', 'bark', 'onebot', 'qqbot', 'webhook'].includes(String(p.pushChannel)) ? String(p.pushChannel) : 'off'
+    if ('pushChannel' in p) p.pushChannel = ['off', 'bark', 'onebot', 'qqbot', 'qqbot-dsh', 'webhook'].includes(String(p.pushChannel)) ? String(p.pushChannel) : 'off'
     if ('pushUrl' in p) p.pushUrl = String(p.pushUrl || '').trim().slice(0, 500)
     if ('onebotUrl' in p) p.onebotUrl = String(p.onebotUrl || '').trim().slice(0, 300)
     if ('onebotToken' in p) p.onebotToken = String(p.onebotToken || '').trim().slice(0, 200)
@@ -577,6 +585,16 @@ const pondAccount = async () => {
       const legacyDm = String(raw.dmMode || 'off')
       out.dmOn = legacyDm !== 'off'
       if (legacyDm === 'only') out.autoComment = false
+    }
+    /* sources（2026-10-31 → 1.7.0）：内容来源从四档单选改成多选组合。
+     *   老文件没有 sources ⇒ 由 sourceMode 换算：feed→[feed]、follow→[follow]、
+     *   mixed→[feed,keywords]、search→[keywords]，行为与四档一一对应。 */
+    if (!Object.prototype.hasOwnProperty.call(raw, 'sources')) {
+      const m = String(raw.sourceMode || 'feed')
+      out.sources = m === 'follow' ? ['follow']
+        : m === 'mixed' ? ['feed', 'keywords']
+        : m === 'search' ? ['keywords']
+        : ['feed']
     }
     return out
   }
@@ -1151,7 +1169,7 @@ const pondAccount = async () => {
   tool({
     name: 'bili_config',
     description: '读 / 改「B站鱼塘」的设置。不给 `patch` 就是读；给了就改（只认 schema 里的字段）。\n'
-      + '例：`{"autoRun":true,"perRoundMax":5,"perDayMax":30,"sourceMode":"feed"}`（内容来源 feed=推荐流 / follow=关注动态 / mixed=推荐+关键词 / search=只搜关键词）；'
+      + '例：`{"autoRun":true,"perRoundMax":5,"perDayMax":30,"sources":["feed","follow"]}`（内容来源多选：feed=推荐流 / follow=关注动态 / keywords=关键词搜索，可任意组合）；'
       + '过滤：`{"filterAds":true,"filterSpam":true,"blockWords":["原神","手游"],"allowWords":["开放世界"]}`；'
       + '日报推送：`{"pushUrl":"https://api.day.app/<key>/{title}/{body}"}`；'
       + '评论与私信是两个独立开关：`{"autoComment":true,"mentionUid":14430149,"dmOn":true,"dmUid":12345678}`。',
@@ -1432,10 +1450,14 @@ const pondAccount = async () => {
     const ruleName = rulePk === 'custom' ? '自定义（以章程里的为准）' : ({ strict: '严格', standard: '标准', loose: '宽松' }[rulePk])
     /* ⭐ 补充判据：档位之外还想强调的（用户自己写），必须原样送到模型眼前，否则他白填 */
     const likeRuleExtra = String(cfg.likeRuleExtra || '').trim()
-    /* ⭐ 内容来源与过滤（2026-10-30 重构）：
-     *    feed = 只看推荐流（默认）· mixed = 推荐为主关键词补 · search = 旧行为只搜关键词。
+    /* ⭐ 内容来源与过滤（2026-10-30 重构；2026-10-31 → 1.7.0 改多选）：
+     *    sources = ['feed','follow','keywords'] 任意组合，全开就都拉、合并候选。
      *    pool = 建议模型一次拉多少条推荐（每轮配额 ×2，钳在 6–30；MCP 那头最多给 30）。 */
-    const mode = ['feed', 'follow', 'mixed', 'search'].includes(String(cfg.sourceMode)) ? String(cfg.sourceMode) : 'feed'
+    const legalSources = ['feed', 'follow', 'keywords']
+    const sources = (Array.isArray(cfg.sources) ? cfg.sources : []).filter((s) => legalSources.includes(String(s)))
+    const hasFeed = sources.includes('feed')
+    const hasFollow = sources.includes('follow')
+    const hasKw = sources.includes('keywords')
     const pool = Math.min(30, Math.max(6, left * 2))
     const bw = Array.isArray(cfg.blockWords) ? cfg.blockWords.filter(Boolean) : []
     const filterOn = Boolean(cfg.filterAds || cfg.filterSpam || bw.length || Number(cfg.minUpFans) > 0)
@@ -1487,15 +1509,18 @@ const pondAccount = async () => {
               : `这一轮最多再转 ${transCap - transUsed} 条。`)
           : '')
         : '')
-      /* ── 内容来源与过滤（2026-10-30 重构：推荐流 bili_feed 进场，关键词降级为可选项） ── */
-      + (mode === 'follow'
-        ? `内容来源：**关注动态** —— 用 \`bili_follow_feed\` 拉你关注 UP 主的最新投稿（要登录且有关注；UP 一发新视频这里就有，比推荐流及时）。一次拉 ps=${pool} 条，不够再翻一页（pn+1），**不要**按关键词搜视频。`
-        : mode === 'search'
-        ? `内容来源：**关键词搜索**（bili_search）—— 关键词${kws.length ? `用这些：${kws.join('、')}` : '用章程里的默认那几组'}。`
-        : mode === 'mixed'
-          ? `内容来源：**推荐流为主、关键词补充** —— 先用 \`bili_feed\` 拉推荐流（一次拉 ps=${pool} 条，够这一轮挑），配额还剩很多时再用关键词搜索补一轮（bili_search），关键词${kws.length ? `用这些：${kws.join('、')}` : '用章程里的默认那几组'}。`
-          : `内容来源：**只看推荐流** —— 用 \`bili_feed\` 拉 B站 给这个账号个性化推的内容（一次拉 ps=${pool} 条，够这一轮挑；不够再翻一页），**不要**按关键词搜视频。`
-          + `⚠️ 返回里 \`personalized:false\` = 这一轮**不是**账号个性化推荐（原因看 \`note\` 字段：接口异常退了全站热门，或登录态没被认出）—— 报告里必须如实带一句。`)
+      /* ── 内容来源（2026-10-31 → 1.7.0 多选：开几个就都拉，候选合并后统一判重挑选） ── */
+      + (hasFeed || hasFollow || hasKw
+        ? `内容来源（${sources.length} 个，**每个都拉**，候选合并后统一判重、统一挑）：`
+          + (hasFeed ? `\n① **推荐流**：用 \`bili_feed\` 拉 B站 给这个账号个性化推的内容（一次 ps=${pool} 条，不够翻页 pn+1）`
+            + `⚠️ 返回 \`personalized:false\` = 这轮不是账号个性化（原因看 \`note\`），报告如实带一句；`
+            : '')
+          + (hasFollow ? `\n${hasFeed ? '②' : '①'} **关注动态**：用 \`bili_follow_feed\` 拉你关注 UP 主的最新投稿（要登录且有关注；返回空 = 关注的人最近没投稿，照实写报告别空转）`
+            : '')
+          + (hasKw ? `\n${(hasFeed ? 2 : 0) + (hasFollow ? 1 : 0) + 1} **关键词搜索**（bili_search）：关键词${kws.length ? `用这些：${kws.join('、')}` : '用章程里的默认那几组'}（近 7 天优先）`
+            : '')
+          + `\n每个来源**各拉一次**，合并后再判重挑选；报告里不用按来源分开写。`
+        : `内容来源：一个都没开 —— 去设置页「内容来源」至少打开一个（推荐流 / 关注动态 / 关键词）。`)
       + (filterOn
         ? `🛡 **广告/引流过滤开在工具层**：结果里被挡的已经不下发（被挡条数看返回的 \`filtered\` 字段，报统计就行）。`
           + `规则：${filterDesc}${bw.length ? `；自定义屏蔽词：${bw.slice(0, 20).join('、')}` : ''}${Number(cfg.minUpFans) > 0 ? `；UP 粉丝数下限 ${cfg.minUpFans}` : ''}。`
@@ -2915,6 +2940,39 @@ const pondAccount = async () => {
     qqTokCache = { tok, at: now, appId }
     return tok
   }
+  const qqSend = async (appId, secret, openid, plain) => {
+    const tok = await qqBotToken(appId, secret)
+    return fetch(`https://api.sgroup.qq.com/users/${openid}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: 'QQBot ' + tok },
+      body: JSON.stringify({ content: plain, msg_type: 0, msg_seq: 1 }),
+      signal: AbortSignal.timeout(10_000),
+    })
+  }
+  /* ⭐ qqbot-dsh 渠道（1.7.0）：复用 DSH 里**已经绑定**的 QQ 机器人，零配置 ——
+   *    appId / 收件人 openid 读 `integrations/dsh-qq/config.json`（ownerUserOpenid），
+   *    secret 按 secretRef 从 `.credentials.yaml` 的 refs 里解析。 */
+  const resolveDshQqBot = () => {
+    const home = dirname(stateDir)
+    let bot = null
+    try {
+      const j = JSON.parse(readFileSync(join(home, 'integrations', 'dsh-qq', 'config.json'), 'utf8'))
+      bot = (Array.isArray(j?.bots) && j.bots[0]) || null
+    } catch { /* 没装 QQ 集成 */ }
+    if (!bot?.appId || !bot?.secretRef) {
+      throw new Error('没找到 DSH 已绑定的 QQ 机器人（integrations/dsh-qq/config.json 不存在或没绑定过）')
+    }
+    const openid = String(cfg.qqOpenid || '').trim() || String(bot.ownerUserOpenid || '').trim()
+    if (!openid) throw new Error('绑定配置里没有收件人 openid —— 请在「QQ · 官方机器人」档手动填')
+    let secret = ''
+    try {
+      const t = readFileSync(join(home, '.credentials.yaml'), 'utf8')
+      const m = new RegExp('^\\s*' + String(bot.secretRef).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:\\s*["\']?([^"\'\\r\\n]+)', 'm').exec(t)
+      secret = (m?.[1] || '').trim()
+    } catch { /* 读不到走下面的报错 */ }
+    if (!secret) throw new Error('secretRef（' + bot.secretRef + '）在凭据库里没解析到')
+    return { appId: String(bot.appId), secret, openid }
+  }
   const sendPush = async (title, body) => {
     const ch = effectivePushChannel()
     const plain = `${title}\n\n${body}`
@@ -2956,14 +3014,12 @@ const pondAccount = async () => {
       const secret = String(cfg.qqAppSecret || '').trim()
       const openid = String(cfg.qqOpenid || '').trim()
       if (!appId || !secret || !openid) throw new Error('QQ 官方机器人的 AppID / AppSecret / 收件人 openid 都要填')
-      const tok = await qqBotToken(appId, secret)
       // 不带 msg_id = 主动消息：腾讯限制每用户每天 4 条 —— 日推一条够用
-      return fetch(`https://api.sgroup.qq.com/users/${openid}/messages`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', Authorization: 'QQBot ' + tok },
-        body: JSON.stringify({ content: plain, msg_type: 0, msg_seq: 1 }),
-        signal: AbortSignal.timeout(10_000),
-      })
+      return qqSend(appId, secret, openid, plain)
+    }
+    if (ch === 'qqbot-dsh') {
+      const { appId, secret, openid } = resolveDshQqBot()
+      return qqSend(appId, secret, openid, plain)
     }
     // webhook（含老配置自动兼容）
     const url = String(cfg.pushUrl || '').trim()
@@ -2998,7 +3054,8 @@ const pondAccount = async () => {
     return Number(j.streak) || 0
   }
   const bumpDrift = (added) => {
-    const feedish = ['feed', 'follow', 'mixed'].includes(String(cfg.sourceMode))
+    const srcs = Array.isArray(cfg.sources) && cfg.sources.length ? cfg.sources : ['feed']
+    const feedish = srcs.includes('feed') || srcs.includes('follow')
     const streak = feedish && added <= 0 ? readDrift() + 1 : 0
     try { writeFileSync(driftFile, JSON.stringify({ streak }), 'utf8') } catch { /* 记不上就算了 */ }
     if (streak >= 3) log(`⚠️ 连续 ${streak} 轮没挑中 —— 推荐流可能跑偏了，考虑切「推荐为主 + 关键词补充」或改自定义屏蔽词`)
@@ -3461,7 +3518,7 @@ const pondAccount = async () => {
     /* ⭐ 2026-10-30：内容来源默认是推荐流（bili_feed），顺带真拉一次验证 ——
      *    wbi 签名 / 推荐接口 / 登录态哪一环坏了，这里当场就能看见，别等值班轮白跑。
      *    个性化状态 + 前两条标题预览直接报出来，用户一眼看出「这是不是我的推荐」。 */
-    if (out.ok && cfg.sourceMode !== 'search') {
+    if (out.ok && (!Array.isArray(cfg.sources) || !cfg.sources.length || cfg.sources.includes('feed'))) {
       try {
         const f = await call('bili_feed', { pn: 1, ps: 5 })
         const t = typeof f === 'string' ? f : JSON.stringify(f)
@@ -3479,7 +3536,7 @@ const pondAccount = async () => {
       } catch (e) { out.steps.push('推荐流拉不动：' + String(e?.message ?? e).slice(0, 80)) }
     }
     /* ⭐ 2026-10-31：关注动态档顺带真拉一次 —— 没关注任何 UP / 动态接口异常，这里当场看见 */
-    if (out.ok && cfg.sourceMode === 'follow') {
+    if (out.ok && Array.isArray(cfg.sources) && cfg.sources.includes('follow')) {
       try {
         const f = await call('bili_follow_feed', { pn: 1, ps: 3 })
         const j = (() => { try { return JSON.parse(typeof f === 'string' ? f : JSON.stringify(f)) } catch { return null } })()
@@ -3987,7 +4044,7 @@ const pondAccount = async () => {
         'minDurationMin', 'maxDurationMin', 'preferSubtitle', 'subtitleProbeMax',
         'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'dutyProvider', 'dutyModel', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound',
         // 2026-10-30 内容来源与过滤（推荐流 bili_feed / 广告引流过滤 / 自定义屏蔽词）
-        'sourceMode', 'filterAds', 'filterSpam', 'blockWords', 'allowWords', 'minUpFans',
+        'sourceMode', 'sources', 'filterAds', 'filterSpam', 'blockWords', 'allowWords', 'minUpFans',
         // 2026-10-31 推送渠道
         'pushChannel', 'pushUrl', 'onebotUrl', 'onebotToken', 'onebotTarget', 'onebotGroup', 'qqAppId', 'qqAppSecret', 'qqOpenid',
         // 2026-10-22 守护评论区（骑士团）

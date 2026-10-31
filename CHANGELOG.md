@@ -1,5 +1,14 @@
 # 更新日志
 
+## 1.7.0（2026-10-31）
+
+- **内容来源改多选**：推荐流 / 关注动态 / 关键词搜索三个开关自由组合（原来四档互斥）——
+  开几个就都拉，候选合并后统一判重挑选。老配置的 sourceMode 自动换算成 sources（零迁移）。
+- **推送渠道新增「QQ · 复用 DSH 已绑定的机器人」**：自动读 `integrations/dsh-qq/config.json`
+  （appId / 收件人 openid = 绑定时登记的 ownerUserOpenid）+ `.credentials.yaml` 里 secretRef
+  对应的密钥 —— 零配置，不用再挂第二个机器人；想推给别人仍可用「官方机器人」档手动填 openid。
+- **值班章程措辞同步**：来源多选口径（每个都拉、合并候选）。
+
 ## 1.6.0（2026-10-31）
 
 - **推送渠道多选**：`pushChannel` 四档 —— **Bark**（模板 pushUrl）、**QQ · OneBot/NapCat**
