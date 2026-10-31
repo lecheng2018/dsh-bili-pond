@@ -2964,7 +2964,7 @@ const pondAccount = async () => {
       const idm = /^(\s*)- id:\s*(.+?)\s*$/.exec(line)
       if (idm) {
         if (cur && cur.secret) found.push(cur)
-        cur = /qqbot/i.test(idm[2]) ? { appId: '', secret: '', openid: '' } : null
+        cur = /qqbot|dsh-qq/i.test(idm[2]) ? { appId: '', secret: '', openid: '' } : null
         continue
       }
       if (!cur) continue
