@@ -1799,7 +1799,7 @@ window.__ModuleLoader__.load({
             }))) : null,
           String(pushChannel ?? 'off') === 'qqbot' ? h('div', { 'data-bd-sub': '' },
             h('div', { 'data-bd-row-desc': '' },
-              '⚠️ 官方机器人的主动消息每用户每天限 4 条 —— 一天推一条够用。收件人 openid 从你 QQ bot 插件的日志里拿。'),
+              '单聊主动消息每日上限 1000 条/用户（官方 2026-10 口径），用户也可在 QQ 里关闭主动发送。收件人 openid 从你 QQ bot 插件的日志里拿。'),
             h(Row, {
               label: 'AppID',
             }, h('input', {

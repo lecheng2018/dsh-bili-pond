@@ -231,7 +231,7 @@ DSH 插件、dsh 教程等）。每行一个，选词三条经验：
 |---|---|---|
 | Bark（iOS） | 模板 `https://api.day.app/<key>/{title}/{body}` | 带 `{title}/{body}` 占位符按模板替换后请求 |
 | QQ · OneBot / NapCat | HTTP 地址 + 可选 token + 私聊 QQ 号 **或** 群号 | 会话自己定：私聊推给自己、群推给群里 |
-| QQ · 官方机器人 | AppID + AppSecret + 收件人 openid | ⚠️ 官方主动消息每用户每天限 4 条，日推够用；openid 从你 QQ bot 插件的日志里拿 |
+| QQ · 官方机器人 | AppID + AppSecret + 收件人 openid | 日报以 **markdown** 发（链接可点）；主动消息单聊每日上限 1000 条/用户；openid 从你 QQ bot 插件的日志里拿 |
 | HTTP 代理推送（Webhook） | 推送地址 + 可选自定义请求头 | 收 POST JSON `{title, body}`（URL 带 `{title}/{body}` 则按模板 GET）；自建转发服务想转 QQ / 钉钉 / 任意渠道都行 |
 
 **推送节奏**：不是每轮都推 —— 每天到「推送时间」（默认 21:00）把**当天挑中的视频**合成一条推出去

@@ -2930,7 +2930,7 @@ const pondAccount = async () => {
   const qqBotToken = async (appId, secret) => {
     const now = Date.now()
     if (qqTokCache.tok && qqTokCache.appId === appId && now - qqTokCache.at < 90 * 60_000) return qqTokCache.tok
-    const r = await fetch('https://bots.qq.com/app/getAppAccessToken', {
+    const r = await fetch('https://api.bot.qq.com/app/getAppAccessToken', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ appId, clientSecret: secret }),
@@ -2942,16 +2942,26 @@ const pondAccount = async () => {
     qqTokCache = { tok, at: now, appId }
     return tok
   }
-  const qqSend = async (appId, secret, openid, plain) => {
+  const qqSend = async (appId, secret, openid, plain, markdown) => {
     const tok = await qqBotToken(appId, secret)
-    return fetch(`https://api.sgroup.qq.com/v2/users/${openid}/messages`, {
+    // ⭐ 域名 2026-08-10 起统一为 api.bot.qq.com（官方文档口径）；markdown 消息里链接可点
+    const bodyObj = markdown
+      ? { msg_type: 2, markdown: { content: markdown }, msg_seq: 1 }
+      : { msg_type: 0, content: plain, msg_seq: 1 }
+    const r = await fetch(`https://api.bot.qq.com/v2/users/${openid}/messages`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', Authorization: 'QQBot ' + tok },
-      body: JSON.stringify({ content: plain, msg_type: 0, msg_seq: 1 }),
+      body: JSON.stringify(bodyObj),
       signal: AbortSignal.timeout(10_000),
     })
+    // ⚠️ 业务失败时 HTTP 也可能 200（如 304023 审核中）—— 必须看 body 里的 err_code
+    let j = null
+    try { j = await r.json() } catch { /* 无包体（204 等）当成功 */ }
+    const err = j && Number(j.err_code || j.code || 0)
+    if (err) throw new Error(`QQ err_code=${err} ${j.message || ''}`.trim())
+    return r
   }
-  const sendPush = async (title, body) => {
+  const sendPush = async (title, body, mdBody) => {
     const ch = effectivePushChannel()
     const plain = `${title}\n\n${body}`
     if (ch === 'bark') {
@@ -2992,8 +3002,8 @@ const pondAccount = async () => {
       const secret = String(cfg.qqAppSecret || '').trim()
       const openid = String(cfg.qqOpenid || '').trim()
       if (!appId || !secret || !openid) throw new Error('QQ 官方机器人的 AppID / AppSecret / 收件人 openid 都要填')
-      // 不带 msg_id = 主动消息：腾讯限制每用户每天 4 条 —— 日推一条够用
-      return qqSend(appId, secret, openid, plain)
+      // 日报用 markdown 发（链接可点）；主动消息单聊每日上限 1000 条/用户（官方 2026-10 口径）
+      return qqSend(appId, secret, openid, plain, mdBody)
     }
     // webhook = HTTP 代理推送（含老配置自动兼容）：
     //  · URL 带 {title}/{body} 占位符 ⇒ 模板替换后 GET（任何「GET 一个 URL 就推」的服务都能接）
@@ -3042,7 +3052,9 @@ const pondAccount = async () => {
       }
       const title = `🐟 今日鱼塘日报 · ${picks.length} 条`
       const body = picks.slice(0, 15).map((e, i) => `${i + 1}. ${e.title || e.bvid}\nhttps://www.bilibili.com/video/${e.bvid}`).join('\n\n')
-      Promise.resolve(sendPush(title, body))
+      // QQ 渠道用 markdown 发：链接可点（纯文本消息里链接点不动，官方文档附录 A）
+      const mdBody = `## 🐟 今日鱼塘日报\n\n` + picks.slice(0, 15).map((e, i) => `${i + 1}. [${(e.title || e.bvid).replace(/[\[\]]/g, '')}](https://www.bilibili.com/video/${e.bvid})`).join('\n\n')
+      Promise.resolve(sendPush(title, body, mdBody))
         .then((r) => log(`每日推送[${effectivePushChannel()}]${r?.ok ? '成功' : '失败（HTTP ' + r?.status + '）'} · ${picks.length} 条`))
         .catch((e) => log(`每日推送失败（不影响值班）：${e?.message ?? e}`))
     } catch (e) {
@@ -3971,7 +3983,7 @@ const pondAccount = async () => {
         return sendJson(res, 200, { ok: false, error: '先在「日报推送」里选一个渠道并把信息填好（填完点一下别处，字段就保存了）' })
       }
       try {
-        const r = await sendPush('🐟 鱼塘推送测试', '这是一条测试推送 —— 看到它说明推送通了，之后每轮挑中的视频都会这样推过来。')
+        const r = await sendPush('🐟 鱼塘推送测试', '这是一条测试推送 —— 看到它说明推送通了。', '## 🐟 鱼塘推送测试\n\n这是一条 **markdown** 测试推送 —— 通了之后，每天这个点会收到当天挑中的视频，链接可直接点。')
         log(`测试推送[${ch}]${r.ok ? '成功' : '失败（HTTP ' + r.status + '）'}`)
         return sendJson(res, 200, { ok: r.ok, status: r.status, channel: ch, error: r.ok ? '' : `HTTP ${r.status} —— 检查该渠道的地址 / 目标 / 密钥` })
       } catch (e) {
