@@ -785,7 +785,15 @@ window.__ModuleLoader__.load({
       const [blockWords, setBlockWords] = React.useState(null)  // 自定义屏蔽词（每行一个）
       const [minUpFans, setMinUpFans] = React.useState(null)    // UP 粉丝数下限（0 = 不查）
       const [allowWords, setAllowWords] = React.useState(null)  // 放行词/白名单（每行一个）
-      const [pushUrl, setPushUrl] = React.useState(null)        // 日报推送 webhook（Bark 模板或 POST JSON）
+      const [pushUrl, setPushUrl] = React.useState(null)        // Bark 模板 / webhook 地址
+      const [pushChannel, setPushChannel] = React.useState(null) // off / bark / onebot / qqbot / webhook
+      const [obUrl, setObUrl] = React.useState(null)            // OneBot HTTP 地址
+      const [obToken, setObToken] = React.useState(null)        // OneBot access token（可空）
+      const [obTarget, setObTarget] = React.useState(null)      // OneBot 私聊 QQ 号
+      const [obGroup, setObGroup] = React.useState(null)        // OneBot 群号（填了发群）
+      const [qqAppIdS, setQqAppIdS] = React.useState(null)      // QQ 官方机器人 AppID
+      const [qqSecret, setQqSecret] = React.useState(null)      // QQ 官方机器人 AppSecret
+      const [qqOpenidS, setQqOpenidS] = React.useState(null)    // QQ 官方机器人收件人 openid
       const [filterLog, setFilterLog] = React.useState(null)    // 过滤记录（展开才拉）
       const [filterLogOpen, setFilterLogOpen] = React.useState(false)
       const [insights, setInsights] = React.useState(null)      // 本周概览（近 7 天产出与开销）
@@ -898,6 +906,14 @@ window.__ModuleLoader__.load({
         if (cfg && minUpFans === null) setMinUpFans(String(cfg.minUpFans ?? 0))
         if (cfg && allowWords === null) setAllowWords((cfg.allowWords || []).join('\n'))
         if (cfg && pushUrl === null) setPushUrl(String(cfg.pushUrl ?? ''))
+        if (cfg && pushChannel === null) setPushChannel(String(cfg.pushChannel ?? 'off'))
+        if (cfg && obUrl === null) setObUrl(String(cfg.onebotUrl ?? ''))
+        if (cfg && obToken === null) setObToken(String(cfg.onebotToken ?? ''))
+        if (cfg && obTarget === null) setObTarget(String(cfg.onebotTarget ?? ''))
+        if (cfg && obGroup === null) setObGroup(String(cfg.onebotGroup ?? ''))
+        if (cfg && qqAppIdS === null) setQqAppIdS(String(cfg.qqAppId ?? ''))
+        if (cfg && qqSecret === null) setQqSecret(String(cfg.qqAppSecret ?? ''))
+        if (cfg && qqOpenidS === null) setQqOpenidS(String(cfg.qqOpenid ?? ''))
         if (cfg && likePerRound === null) setLikePerRound(String(cfg.likePerRound ?? 1))
         if (cfg && likePerDay === null) setLikePerDay(String(cfg.likePerDay ?? 3))
         if (cfg && likeRule === null) setLikeRule(String(cfg.likeRule ?? 'standard'))
@@ -1697,33 +1713,117 @@ window.__ModuleLoader__.load({
           },
             h('option', { value: 'full' }, '完整'),
             h('option', { value: 'brief' }, '简要'),
-            h('option', { value: 'off' }, '不生成'))),
+            h('option', { value: 'off' }, '不生成')))),
+
+        h(Divider),
+
+        h(Card, { title: '日报推送', desc: '每轮跑完，把新挑中的视频推到你的手机 / QQ' },
           h(Row, {
-            label: '推送 Webhook',
-            hint: '留空不推。Bark 模板：https://api.day.app/<key>/{title}/{body}；其他填 POST JSON 的地址',
+            label: '推送渠道',
+          }, h('select', {
+            'data-bd-select': '', 'data-bd-w-md': '', value: String(pushChannel ?? 'off'),
+            onChange: (e) => { setPushChannel(e.target.value); patch({ pushChannel: e.target.value }, '推送渠道') },
+          },
+            h('option', { value: 'off' }, '不推送'),
+            h('option', { value: 'bark' }, 'Bark（iOS）'),
+            h('option', { value: 'onebot' }, 'QQ · OneBot / NapCat'),
+            h('option', { value: 'qqbot' }, 'QQ · 官方机器人'),
+            h('option', { value: 'webhook' }, '自定义 Webhook'))),
+          String(pushChannel ?? 'off') === 'bark' ? h(Row, {
+            label: 'Bark 模板',
+            hint: 'https://api.day.app/<key>/{title}/{body}',
           }, h('input', {
             'data-bd-input': '', type: 'text',
             value: pushUrl ?? '',
-            placeholder: 'https://…（{title}/{body} 占位符按模板替换）',
+            placeholder: 'https://api.day.app/你的key/{title}/{body}',
             onChange: (e) => setPushUrl(e.target.value),
             onBlur: () => {
               const v = String(pushUrl ?? '').trim()
               if (v === String(cfg?.pushUrl || '')) return
-              patch({ pushUrl: v }, '推送 Webhook')
+              patch({ pushUrl: v }, 'Bark 模板')
             },
-          })),
+          })) : null,
+          String(pushChannel ?? 'off') === 'onebot' ? h('div', { 'data-bd-sub': '' },
+            h(Row, {
+              label: 'OneBot HTTP 地址',
+              hint: 'NapCat 等的 HTTP 服务，例如 http://127.0.0.1:3000',
+            }, h('input', {
+              'data-bd-input': '', type: 'text', value: obUrl ?? '',
+              placeholder: 'http://127.0.0.1:3000',
+              onChange: (e) => setObUrl(e.target.value),
+              onBlur: () => { const v = String(obUrl ?? '').trim(); if (v === String(cfg?.onebotUrl || '')) return; patch({ onebotUrl: v }, 'OneBot 地址') },
+            })),
+            h(Row, {
+              label: 'Access Token',
+              hint: 'OneBot 没设 token 就留空',
+            }, h('input', {
+              'data-bd-input': '', type: 'password', value: obToken ?? '',
+              onChange: (e) => setObToken(e.target.value),
+              onBlur: () => { const v = String(obToken ?? '').trim(); if (v === String(cfg?.onebotToken || '')) return; patch({ onebotToken: v }, 'OneBot Token') },
+            })),
+            h(Row, {
+              label: '私聊 QQ 号',
+              hint: '推给这个 QQ 的私聊（与群号二选一）',
+            }, h('input', {
+              'data-bd-input': '', 'data-bd-w-num': '', type: 'number', value: obTarget ?? '',
+              onChange: (e) => setObTarget(e.target.value),
+              onBlur: () => { const v = String(obTarget ?? '').trim(); if (v === String(cfg?.onebotTarget || '')) return; patch({ onebotTarget: v }, 'OneBot 私聊 QQ 号') },
+            })),
+            h(Row, {
+              label: '群号',
+              hint: '填了就发到这个群（私聊 QQ 号留空）',
+            }, h('input', {
+              'data-bd-input': '', 'data-bd-w-num': '', type: 'number', value: obGroup ?? '',
+              onChange: (e) => setObGroup(e.target.value),
+              onBlur: () => { const v = String(obGroup ?? '').trim(); if (v === String(cfg?.onebotGroup || '')) return; patch({ onebotGroup: v }, 'OneBot 群号') },
+            }))) : null,
+          String(pushChannel ?? 'off') === 'qqbot' ? h('div', { 'data-bd-sub': '' },
+            h('div', { 'data-bd-row-desc': '' },
+              '⚠️ 官方机器人的主动消息每用户每天限 4 条 —— 一天推一条够用。收件人 openid 从你 QQ bot 插件的日志里拿。'),
+            h(Row, {
+              label: 'AppID',
+            }, h('input', {
+              'data-bd-input': '', type: 'text', value: qqAppIdS ?? '',
+              onChange: (e) => setQqAppIdS(e.target.value),
+              onBlur: () => { const v = String(qqAppIdS ?? '').trim(); if (v === String(cfg?.qqAppId || '')) return; patch({ qqAppId: v }, 'QQ AppID') },
+            })),
+            h(Row, {
+              label: 'AppSecret',
+            }, h('input', {
+              'data-bd-input': '', type: 'password', value: qqSecret ?? '',
+              onChange: (e) => setQqSecret(e.target.value),
+              onBlur: () => { const v = String(qqSecret ?? '').trim(); if (v === String(cfg?.qqAppSecret || '')) return; patch({ qqAppSecret: v }, 'QQ AppSecret') },
+            })),
+            h(Row, {
+              label: '收件人 openid',
+            }, h('input', {
+              'data-bd-input': '', type: 'text', value: qqOpenidS ?? '',
+              onChange: (e) => setQqOpenidS(e.target.value),
+              onBlur: () => { const v = String(qqOpenidS ?? '').trim(); if (v === String(cfg?.qqOpenid || '')) return; patch({ qqOpenid: v }, 'QQ 收件人 openid') },
+            }))) : null,
+          String(pushChannel ?? 'off') === 'webhook' ? h(Row, {
+            label: 'Webhook 地址',
+            hint: '收 POST JSON {title, body} 的地址',
+          }, h('input', {
+            'data-bd-input': '', type: 'text', value: pushUrl ?? '',
+            placeholder: 'https://…',
+            onChange: (e) => setPushUrl(e.target.value),
+            onBlur: () => {
+              const v = String(pushUrl ?? '').trim()
+              if (v === String(cfg?.pushUrl || '')) return
+              patch({ pushUrl: v }, 'Webhook 地址')
+            },
+          })) : null,
           h(Row, {
             label: '推送测试',
-            hint: '发一条测试推送 —— 手机收到了才算通（不用跑整轮）',
+            hint: '发一条测试推送（字段失焦即保存，测的就是已保存的配置）',
           }, h('button', {
             'data-bd-btn': '', disabled: Boolean(busy),
             onClick: async () => {
               setBusy('push-test')
               try {
-                // 输入框里改了还没失焦保存的话，直接把草稿递过去测，省一步
-                const v = String(pushUrl ?? '').trim()
-                const r = await jpost('/push-test', v && v !== String(cfg?.pushUrl || '') ? { url: v } : {})
-                if (r?.ok) say('测试推送已发出 —— 看看手机收到了没', 'good')
+                const r = await jpost('/push-test', {})
+                if (r?.ok) say('测试推送已发出 —— 看看手机 / QQ 收到没', 'good')
                 else say('测试推送失败：' + (r?.error || 'HTTP ' + (r?.status ?? '?')), 'warn')
               } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
             },

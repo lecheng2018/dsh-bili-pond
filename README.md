@@ -227,16 +227,15 @@ DSH 插件、dsh 教程等）。每行一个，选词三条经验：
 
 ### 日报推送（可选）
 
-| 项 | 默认 | 说明 |
+| 渠道 | 要填什么 | 说明 |
 |---|---|---|
-| 推送 Webhook | 空 | 留空不推。每轮跑完把**这一轮新挑中**的条目推出去（标题 + 链接） |
+| Bark（iOS） | 模板 `https://api.day.app/<key>/{title}/{body}` | 带 `{title}/{body}` 占位符按模板替换后请求 |
+| QQ · OneBot / NapCat | HTTP 地址 + 可选 token + 私聊 QQ 号 **或** 群号 | 会话自己定：私聊推给自己、群推给群里 |
+| QQ · 官方机器人 | AppID + AppSecret + 收件人 openid | ⚠️ 官方主动消息每用户每天限 4 条，日推够用；openid 从你 QQ bot 插件的日志里拿 |
+| 自定义 Webhook | 收 POST JSON `{title, body}` 的地址 | 钉钉 / 企业微信 / 自建服务都行 |
 
-两种填法：
-
-- **Bark（iOS）**：`https://api.day.app/<你的key>/{title}/{body}` —— 带 `{title}/{body}` 占位符就按模板替换后请求；
-- **其他 webhook**（钉钉 / 企业微信 / QQ bot 桥 / 自建服务）：填一个收 POST 的地址，推送体是 JSON `{title, body}`。
-
-推送是 best-effort：失败只写日志，绝不影响值班本身。不想要推送就留空。
+推送是 best-effort：失败只写日志，绝不影响值班本身。填完点「发一条测试推送」验证
+（不用跑整轮）；老配置只填过 pushUrl 的会自动当 Webhook 发，零迁移。
 
 ### 每轮与每天上限
 

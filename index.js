@@ -131,12 +131,21 @@ export const Config = !z ? undefined : z.object({
   allowWords: z.array(z.string()).default([]).extra('volatile', true),
   /** UP 粉丝数下限（0 = 不查；>0 时会对候选查粉丝数，多打 user 接口） */
   minUpFans: z.natural().default(0).extra('volatile', true),
-  /**
-   * 日报推送 webhook（留空 = 不推）。每轮跑完、真挑中了东西就推一条：
-   *  · URL 里带 {title}/{body} 占位符 ⇒ 按模板替换后 GET（**Bark 风格**：`https://api.day.app/<key>/{title}/{body}`）；
-   *  · 没有占位符 ⇒ POST JSON `{title, body}`（钉钉/企业微信/QQ bot 桥都能接）。
-   */
+  /* ── 日报推送（2026-10-31 → 1.6 多渠道） ──────────────────────────────
+   *  pushChannel 选渠道；每档只读自己那几个字段。老配置只有 pushUrl ⇒ 自动当 webhook 用（零迁移）。
+   *  · bark    = Bark 模板（pushUrl 带 {title}/{body}）
+   *  · onebot  = NapCat / OneBot HTTP（私聊 onebotTarget 或群 onebotGroup，二选一）
+   *  · qqbot   = QQ 官方机器人（appId/secret + 收件人 openid；主动消息每用户每天限 4 条，日推够用）
+   *  · webhook = 任意收 POST JSON 的地址 */
+  pushChannel: z.string().default('off').extra('volatile', true),
   pushUrl: z.string().default('').extra('volatile', true),
+  onebotUrl: z.string().default('').extra('volatile', true),
+  onebotToken: z.string().default('').extra('volatile', true),
+  onebotTarget: z.string().default('').extra('volatile', true),
+  onebotGroup: z.string().default('').extra('volatile', true),
+  qqAppId: z.string().default('').extra('volatile', true),
+  qqAppSecret: z.string().default('').extra('volatile', true),
+  qqOpenid: z.string().default('').extra('volatile', true),
   /** Python：指向 venv 里的那个最好 */
   pythonPath: z.string().default('python').extra('volatile', true),
   /** dsh 的 bin.js（不填就试自动探测，再退化成 shell 里的 dsh） */
@@ -374,7 +383,9 @@ const pondAccount = async () => {
     noon: true, night: true, autoComment: false, circleMode: false, transcribe: false, asrModel: 'small',
     dmOn: false, dmMode: 'off', dmUid: 0,
     keywords: [], commentPerRound: 1, mentionName: '', mentionUid: 0, pythonPath: 'python', dshBin: '', headlessProfile: 'headless', dutyProvider: '', dutyModel: '', overlayMcp: true, reuseRoutes: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
-    sourceMode: 'feed', filterAds: true, filterSpam: true, blockWords: [], allowWords: [], minUpFans: 0, pushUrl: '',
+    sourceMode: 'feed', filterAds: true, filterSpam: true, blockWords: [], allowWords: [], minUpFans: 0,
+    pushChannel: 'off', pushUrl: '', onebotUrl: '', onebotToken: '', onebotTarget: '', onebotGroup: '',
+    qqAppId: '', qqAppSecret: '', qqOpenid: '',
     guardOn: false, guardWhitelist: '', guardOwnAll: true, guardDailyCap: 30, guardScope: 1, guardPerRound: 3, guardPollMinutes: 3, guardEmoji: true, guardTone: '',
     likeOn: false, likePerRound: 1, likePerDay: 3, likeRule: 'standard', likeRuleExtra: '', favOn: false, favPerDay: 2,
   }
@@ -433,7 +444,16 @@ const pondAccount = async () => {
     if ('blockWords' in p) p.blockWords = Array.isArray(p.blockWords) ? p.blockWords.filter((x) => typeof x === 'string').map((s) => s.trim()).filter(Boolean) : []
     if ('allowWords' in p) p.allowWords = Array.isArray(p.allowWords) ? p.allowWords.filter((x) => typeof x === 'string').map((s) => s.trim()).filter(Boolean) : []
     num('minUpFans', 0, 1000000, 0)          // UP 粉丝数下限（0 = 不查）
+    /* ── 2026-10-31 推送渠道 ── */
+    if ('pushChannel' in p) p.pushChannel = ['off', 'bark', 'onebot', 'qqbot', 'webhook'].includes(String(p.pushChannel)) ? String(p.pushChannel) : 'off'
     if ('pushUrl' in p) p.pushUrl = String(p.pushUrl || '').trim().slice(0, 500)
+    if ('onebotUrl' in p) p.onebotUrl = String(p.onebotUrl || '').trim().slice(0, 300)
+    if ('onebotToken' in p) p.onebotToken = String(p.onebotToken || '').trim().slice(0, 200)
+    if ('onebotTarget' in p) p.onebotTarget = String(p.onebotTarget || '').trim().slice(0, 32)
+    if ('onebotGroup' in p) p.onebotGroup = String(p.onebotGroup || '').trim().slice(0, 32)
+    if ('qqAppId' in p) p.qqAppId = String(p.qqAppId || '').trim().slice(0, 64)
+    if ('qqAppSecret' in p) p.qqAppSecret = String(p.qqAppSecret || '').trim().slice(0, 200)
+    if ('qqOpenid' in p) p.qqOpenid = String(p.qqOpenid || '').trim().slice(0, 200)
 
     /* ⭐ 评论上限不能超过每轮挑中数（2026-10-20）
      *    评论的对象只能是"这一轮挑中的视频" ⇒ 挑 3 条却想发 5 条评论是不可能发生的，
@@ -2867,36 +2887,104 @@ const pondAccount = async () => {
     return [...out.values()]
   }
 
-  /* ⭐ 日报推送（2026-10-31）：每轮跑完把挑中的条目推到 webhook（设置页「推送 Webhook」）。
-   *    · URL 里带 {title}/{body} 占位符 ⇒ 模板替换后 GET（**Bark 风格**：https://api.day.app/<key>/{title}/{body}）
-   *    · 没占位符 ⇒ POST JSON {title, body}（钉钉 / 企业微信 / QQ bot 桥都能接）
+  /* ⭐ 日报推送（2026-10-31 → 1.6 多渠道）：每轮跑完把挑中的条目推到所选渠道。
+   *    · bark    = Bark 模板（pushUrl 带 {title}/{body} 占位符）
+   *    · onebot  = NapCat / OneBot HTTP —— 私聊（onebotTarget）或群（onebotGroup），二选一
+   *    · qqbot   = QQ 官方机器人 —— appId/secret + 收件人 openid（主动消息每用户每天限 4 条，日推够用）
+   *    · webhook = 任意收 POST JSON {title, body} 的地址
+   *    ⭐ 老配置兼容：pushChannel 没选（off）但 pushUrl 有值 ⇒ 自动当 webhook 用，升级零迁移。
    *    🔴 best-effort：失败只记日志，绝不影响值班本身。 */
-  const sendPush = async (url, title, body) => {
-    let r
-    if (/\{title\}/.test(url) || /\{body\}/.test(url)) {
-      const filled = url.replaceAll('{title}', encodeURIComponent(title)).replaceAll('{body}', encodeURIComponent(body))
-      r = await fetch(filled, { signal: AbortSignal.timeout(10_000) })
-    } else {
-      r = await fetch(url, {
+  const effectivePushChannel = () => {
+    const ch = String(cfg.pushChannel || 'off')
+    if (ch !== 'off') return ch
+    return String(cfg.pushUrl || '').trim() ? 'webhook' : 'off'
+  }
+  let qqTokCache = { tok: '', at: 0, appId: '' }
+  const qqBotToken = async (appId, secret) => {
+    const now = Date.now()
+    if (qqTokCache.tok && qqTokCache.appId === appId && now - qqTokCache.at < 90 * 60_000) return qqTokCache.tok
+    const r = await fetch('https://bots.qq.com/app/getAppAccessToken', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ appId, clientSecret: secret }),
+      signal: AbortSignal.timeout(10_000),
+    })
+    const j = await r.json().catch(() => ({}))
+    const tok = String(j?.access_token || '')
+    if (!tok) throw new Error('QQ access token 拿不到（检查 AppID/AppSecret）：' + JSON.stringify(j).slice(0, 120))
+    qqTokCache = { tok, at: now, appId }
+    return tok
+  }
+  const sendPush = async (title, body) => {
+    const ch = effectivePushChannel()
+    const plain = `${title}\n\n${body}`
+    if (ch === 'bark') {
+      const url = String(cfg.pushUrl || '').trim()
+      if (!/^https?:\/\//i.test(url)) throw new Error('Bark URL 没填或不对')
+      let r
+      if (/\{title\}/.test(url) || /\{body\}/.test(url)) {
+        const filled = url.replaceAll('{title}', encodeURIComponent(title)).replaceAll('{body}', encodeURIComponent(body))
+        r = await fetch(filled, { signal: AbortSignal.timeout(10_000) })
+      } else {
+        r = await fetch(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ title, body }),
+          signal: AbortSignal.timeout(10_000),
+        })
+      }
+      return r
+    }
+    if (ch === 'onebot') {
+      const base = String(cfg.onebotUrl || '').trim().replace(/\/+$/, '')
+      if (!/^https?:\/\//i.test(base)) throw new Error('OneBot HTTP 地址没填（例如 http://127.0.0.1:3000）')
+      const gid = Number(cfg.onebotGroup) || 0
+      const uid = Number(cfg.onebotTarget) || 0
+      const text = [{ type: 'text', data: { text: plain } }]
+      const path = gid > 0 ? '/send_group_msg' : '/send_private_msg'
+      const payload = gid > 0 ? { group_id: gid, message: text }
+        : uid > 0 ? { user_id: uid, message: text }
+        : null
+      if (!payload) throw new Error('OneBot 推送目标没填（私聊 QQ 号或群号，二选一）')
+      const headers = { 'content-type': 'application/json' }
+      const token = String(cfg.onebotToken || '').trim()
+      if (token) headers.Authorization = 'Bearer ' + token
+      return fetch(base + path, { method: 'POST', headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(10_000) })
+    }
+    if (ch === 'qqbot') {
+      const appId = String(cfg.qqAppId || '').trim()
+      const secret = String(cfg.qqAppSecret || '').trim()
+      const openid = String(cfg.qqOpenid || '').trim()
+      if (!appId || !secret || !openid) throw new Error('QQ 官方机器人的 AppID / AppSecret / 收件人 openid 都要填')
+      const tok = await qqBotToken(appId, secret)
+      // 不带 msg_id = 主动消息：腾讯限制每用户每天 4 条 —— 日推一条够用
+      return fetch(`https://api.sgroup.qq.com/users/${openid}/messages`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ title, body }),
+        headers: { 'content-type': 'application/json', Authorization: 'QQBot ' + tok },
+        body: JSON.stringify({ content: plain, msg_type: 0, msg_seq: 1 }),
         signal: AbortSignal.timeout(10_000),
       })
     }
-    return r
+    // webhook（含老配置自动兼容）
+    const url = String(cfg.pushUrl || '').trim()
+    if (!/^https?:\/\//i.test(url)) throw new Error('推送地址没填')
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title, body }),
+      signal: AbortSignal.timeout(10_000),
+    })
   }
   const pushRoundDigest = async (picks, tookSec) => {
-    const url = String(cfg.pushUrl || '').trim()
-    if (!url || !/^https?:\/\//i.test(url)) return
+    if (effectivePushChannel() === 'off') return
     const n = picks.length
     const title = n > 0 ? `🐟 鱼塘本轮挑中 ${n} 条` : '🐟 鱼塘本轮没挑中'
     const body = n > 0
       ? picks.slice(0, 10).map((e, i) => `${i + 1}. ${e.title || e.bvid}\nhttps://www.bilibili.com/video/${e.bvid}`).join('\n\n')
       : `这一轮跑完了（用时 ${fmtDur(tookSec)}），没有值得推给你的新视频。`
     try {
-      const r = await sendPush(url, title, body)
-      log(`推送${r.ok ? '成功' : '失败（HTTP ' + r.status + '）'} · ${n} 条`)
+      const r = await sendPush(title, body)
+      log(`推送[${effectivePushChannel()}]${r.ok ? '成功' : '失败（HTTP ' + r.status + '）'} · ${n} 条`)
     } catch (e) {
       log(`推送失败（不影响值班）：${e?.message ?? e}`)
     }
@@ -3814,19 +3902,19 @@ const pondAccount = async () => {
       return sendJson(res, 200, { ok: true, items })
     }
 
-    /* ⭐ 推送测试（2026-10-31）：不用跑整轮就能验证 webhook 通不通 —— 传 url 就测 url，没传测已存的 */
+    /* ⭐ 推送测试（2026-10-31 → 1.6 多渠道）：不用跑整轮就能验证所选渠道通不通。
+     *    各个字段失焦即存 ⇒ 这里测的就是「已保存」的配置；测之前先把输入框点出焦点。 */
     if (req.method === 'POST' && path === '/api/bili-pond/push-test') {
-      const body = await readBody(req)
-      const url = String((body && body.url) || cfg.pushUrl || '').trim()
-      if (!url || !/^https?:\/\//i.test(url)) {
-        return sendJson(res, 200, { ok: false, error: '先在「日报」卡片里填推送 Webhook（以 https:// 开头）' })
+      const ch = effectivePushChannel()
+      if (ch === 'off') {
+        return sendJson(res, 200, { ok: false, error: '先在「日报推送」里选一个渠道并把信息填好（填完点一下别处，字段就保存了）' })
       }
       try {
-        const r = await sendPush(url, '🐟 鱼塘推送测试', '这是一条测试推送 —— 看到它说明 webhook 通了，之后每轮挑中的视频都会这样推过来。')
-        log(`测试推送${r.ok ? '成功' : '失败（HTTP ' + r.status + '）'}`)
-        return sendJson(res, 200, { ok: r.ok, status: r.status, error: r.ok ? '' : `HTTP ${r.status} —— 看看 URL 格式对不对（Bark 记得带 {title}/{body} 占位符）` })
+        const r = await sendPush('🐟 鱼塘推送测试', '这是一条测试推送 —— 看到它说明推送通了，之后每轮挑中的视频都会这样推过来。')
+        log(`测试推送[${ch}]${r.ok ? '成功' : '失败（HTTP ' + r.status + '）'}`)
+        return sendJson(res, 200, { ok: r.ok, status: r.status, channel: ch, error: r.ok ? '' : `HTTP ${r.status} —— 检查该渠道的地址 / 目标 / 密钥` })
       } catch (e) {
-        return sendJson(res, 200, { ok: false, error: String(e?.message ?? e) })
+        return sendJson(res, 200, { ok: false, channel: ch, error: String(e?.message ?? e) })
       }
     }
 
@@ -3899,7 +3987,9 @@ const pondAccount = async () => {
         'minDurationMin', 'maxDurationMin', 'preferSubtitle', 'subtitleProbeMax',
         'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'dutyProvider', 'dutyModel', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound',
         // 2026-10-30 内容来源与过滤（推荐流 bili_feed / 广告引流过滤 / 自定义屏蔽词）
-        'sourceMode', 'filterAds', 'filterSpam', 'blockWords', 'allowWords', 'minUpFans', 'pushUrl',
+        'sourceMode', 'filterAds', 'filterSpam', 'blockWords', 'allowWords', 'minUpFans',
+        // 2026-10-31 推送渠道
+        'pushChannel', 'pushUrl', 'onebotUrl', 'onebotToken', 'onebotTarget', 'onebotGroup', 'qqAppId', 'qqAppSecret', 'qqOpenid',
         // 2026-10-22 守护评论区（骑士团）
         'guardOn', 'guardWhitelist', 'guardOwnAll', 'guardDailyCap', 'guardScope', 'guardPerRound', 'guardPollMinutes', 'guardEmoji', 'guardTone',
         // 2026-10-25 点赞与收藏
