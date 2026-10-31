@@ -154,5 +154,17 @@ console.log('=== ⑦ 推送渠道：qqbot-dsh 已废弃（1.7.3 移除，钳回 
   cleanup()
 }
 
+console.log('=== ⑧ 每日推送时间钳制（1.8.0） ===')
+{
+  const { call, cleanup } = await loadWith({})
+  const r = await call('POST', '/api/bili-pond/config', JSON.stringify({ pushDailyAt: '21:30' }))
+  ok(r.config?.pushDailyAt === '21:30', '合法 HH:mm 保存', String(r.config?.pushDailyAt))
+  const b = await call('POST', '/api/bili-pond/config', JSON.stringify({ pushDailyAt: '9:05' }))
+  ok(b.config?.pushDailyAt === '09:05', '9:05 补零为 09:05', String(b.config?.pushDailyAt))
+  const bad = await call('POST', '/api/bili-pond/config', JSON.stringify({ pushDailyAt: '25:99' }))
+  ok(bad.config?.pushDailyAt === '', '非法时间清空（不推）', JSON.stringify(bad.config?.pushDailyAt))
+  cleanup()
+}
+
 console.log('\n' + (failures === 0 ? '全部通过 ✓' : failures + ' 项失败 ✗'))
 process.exit(failures === 0 ? 0 : 1)

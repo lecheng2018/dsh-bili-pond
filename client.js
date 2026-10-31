@@ -790,6 +790,7 @@ window.__ModuleLoader__.load({
       const [allowWords, setAllowWords] = React.useState(null)  // 放行词/白名单（每行一个）
       const [pushUrl, setPushUrl] = React.useState(null)        // Bark 模板 / webhook 地址
       const [pushHeaders, setPushHeaders] = React.useState(null) // webhook 自定义请求头
+      const [pushDailyAt, setPushDailyAt] = React.useState(null) // 每日推送时间 HH:mm
       const [pushChannel, setPushChannel] = React.useState(null) // off / bark / onebot / qqbot / webhook
       const [obUrl, setObUrl] = React.useState(null)            // OneBot HTTP 地址
       const [obToken, setObToken] = React.useState(null)        // OneBot access token（可空）
@@ -910,6 +911,7 @@ window.__ModuleLoader__.load({
         if (cfg && allowWords === null) setAllowWords((cfg.allowWords || []).join('\n'))
         if (cfg && pushUrl === null) setPushUrl(String(cfg.pushUrl ?? ''))
         if (cfg && pushHeaders === null) setPushHeaders(String(cfg.pushHeaders ?? ''))
+        if (cfg && pushDailyAt === null) setPushDailyAt(String(cfg.pushDailyAt ?? '21:00'))
         if (cfg && pushChannel === null) setPushChannel(String(cfg.pushChannel ?? 'off'))
         if (cfg && obUrl === null) setObUrl(String(cfg.onebotUrl ?? ''))
         if (cfg && obToken === null) setObToken(String(cfg.onebotToken ?? ''))
@@ -1723,7 +1725,7 @@ window.__ModuleLoader__.load({
 
         h(Divider),
 
-        h(Card, { title: '日报推送', desc: '每轮跑完，把新挑中的视频推到你的手机 / QQ' },
+        h(Card, { title: '日报推送', desc: '每天到点推一条：当天挑中的视频 + 链接（没挑中就不推，安静）' },
           h(Row, {
             label: '推送渠道',
           }, h('select', {
@@ -1735,6 +1737,18 @@ window.__ModuleLoader__.load({
             h('option', { value: 'onebot' }, 'QQ · OneBot / NapCat'),
             h('option', { value: 'qqbot' }, 'QQ · 官方机器人（手动填凭据）'),
             h('option', { value: 'webhook' }, 'HTTP 代理推送（Webhook）'))),
+          String(pushChannel ?? 'off') !== 'off' ? h(Row, {
+            label: '每天推送时间',
+            hint: '到点把当天挑中的合成一条推出去（HH:mm）',
+          }, h('input', {
+            'data-bd-input': '', type: 'time', value: pushDailyAt ?? '21:00',
+            onChange: (e) => setPushDailyAt(e.target.value),
+            onBlur: () => {
+              const v = String(pushDailyAt ?? '').trim()
+              if (v === String(cfg?.pushDailyAt || '')) return
+              patch({ pushDailyAt: v }, '每天推送时间')
+            },
+          })) : null,
           String(pushChannel ?? 'off') === 'bark' ? h(Row, {
             label: 'Bark 模板',
             hint: 'https://api.day.app/<key>/{title}/{body}',

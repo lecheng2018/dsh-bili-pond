@@ -144,6 +144,8 @@ export const Config = !z ? undefined : z.object({
   pushUrl: z.string().default('').extra('volatile', true),
   /** Webhook 附加请求头（每行一个 `Key: Value`），给自建转发服务做鉴权用 */
   pushHeaders: z.string().default('').extra('volatile', true),
+  /** 每日汇总推送时间（HH:mm）：到点把当天挑中的合成一条推出去（留空 = 不推） */
+  pushDailyAt: z.string().default('21:00').extra('volatile', true),
   onebotUrl: z.string().default('').extra('volatile', true),
   onebotToken: z.string().default('').extra('volatile', true),
   onebotTarget: z.string().default('').extra('volatile', true),
@@ -388,7 +390,7 @@ const pondAccount = async () => {
     noon: true, night: true, autoComment: false, circleMode: false, transcribe: false, asrModel: 'small',
     dmOn: false, dmMode: 'off', dmUid: 0,
     keywords: [], commentPerRound: 1, mentionName: '', mentionUid: 0, pythonPath: 'python', dshBin: '', headlessProfile: 'headless', dutyProvider: '', dutyModel: '', overlayMcp: true, reuseRoutes: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
-    pushHeaders: '',
+    pushHeaders: '', pushDailyAt: '21:00',
     sourceMode: 'feed', sources: ['feed'], filterAds: true, filterSpam: true, blockWords: [], allowWords: [], minUpFans: 0,
     pushChannel: 'off', pushUrl: '', onebotUrl: '', onebotToken: '', onebotTarget: '', onebotGroup: '',
     qqAppId: '', qqAppSecret: '', qqOpenid: '',
@@ -459,6 +461,11 @@ const pondAccount = async () => {
     if ('pushChannel' in p) p.pushChannel = ['off', 'bark', 'onebot', 'qqbot', 'webhook'].includes(String(p.pushChannel)) ? String(p.pushChannel) : 'off'
     if ('pushUrl' in p) p.pushUrl = String(p.pushUrl || '').trim().slice(0, 500)
     if ('pushHeaders' in p) p.pushHeaders = String(p.pushHeaders || '').slice(0, 1500)
+    if ('pushDailyAt' in p) {
+      const v = String(p.pushDailyAt || '').trim()
+      const m = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(v)
+      p.pushDailyAt = m ? (m[1].padStart(2, '0') + ':' + m[2]) : ''
+    }
     if ('onebotUrl' in p) p.onebotUrl = String(p.onebotUrl || '').trim().slice(0, 300)
     if ('onebotToken' in p) p.onebotToken = String(p.onebotToken || '').trim().slice(0, 200)
     if ('onebotTarget' in p) p.onebotTarget = String(p.onebotTarget || '').trim().slice(0, 32)
@@ -2172,17 +2179,7 @@ const pondAccount = async () => {
         /* ⭐ 2026-10-31 轮末两件事（都是 best-effort，绝不影响值班）：
          *    ① 漂移检测：推荐流/关注动态连续几轮 0 挑中 ⇒ 状态页挂提醒；
          *    ② webhook 推送：把**这一轮新挑中**的条目推出去（设置了推送 URL 才推）。 */
-        let added = pickedNow - pickedBefore.length
-        let newPicks = []
-        try {
-          const before = new Set(pickedBefore)
-          newPicks = harvestReport(reportFileOf(new Date())).filter((e) => e.picked && !before.has(e.bvid))
-          if (newPicks.length) added = newPicks.length
-        } catch { /* 报告读不了就用计数差 */ }
-        try { bumpDrift(added) } catch (e) { log(`漂移记账异常（不影响值班）：${e?.message ?? e}`) }
-        if (String(cfg.pushUrl || '').trim()) {
-          Promise.resolve(pushRoundDigest(newPicks, tookSec)).catch((e) => log(`推送异常（不影响值班）：${e?.message ?? e}`))
-        }
+        try { bumpDrift(pickedNow - pickedBefore.length) } catch (e) { log(`漂移记账异常（不影响值班）：${e?.message ?? e}`) }
       } else {
         log(`结束但没成功 · 用时 ${fmtDur(tookSec)} · ${fail.hint}`)
         bumpState({ lastError: { at: new Date().toISOString(), ...fail } })
@@ -2258,6 +2255,7 @@ const pondAccount = async () => {
     try {
       refreshCfg()
       const now = new Date()
+      maybeDailyPush(now)      // ⭐ 每日汇总推送（与值班排班无关，渠道+时间到了就推）
       const st = readJson(dutyStateFile, {})
       const today = dayKey(now)
 
@@ -3018,18 +3016,37 @@ const pondAccount = async () => {
       signal: AbortSignal.timeout(10_000),
     })
   }
-  const pushRoundDigest = async (picks, tookSec) => {
-    if (effectivePushChannel() === 'off') return
-    const n = picks.length
-    const title = n > 0 ? `🐟 鱼塘本轮挑中 ${n} 条` : '🐟 鱼塘本轮没挑中'
-    const body = n > 0
-      ? picks.slice(0, 10).map((e, i) => `${i + 1}. ${e.title || e.bvid}\nhttps://www.bilibili.com/video/${e.bvid}`).join('\n\n')
-      : `这一轮跑完了（用时 ${fmtDur(tookSec)}），没有值得推给你的新视频。`
+  /* ⭐ 每日汇总推送（2026-11-01）：每天到 pushDailyAt 的点，把当天挑中的合成**一条**推出去
+   *    （每轮跑完不再推 —— QQ 官方 C2C 主动消息每用户每天限 4 条，一天一条最稳）。
+   *    当天 0 挑中就不推（安静）；推送前先落账（push-state.json），失败记日志隔天再算。
+   *    由 tick 每分钟调一次，绝不让异常外冒。 */
+  const pushStateFile = join(stateDir, 'push-state.json')
+  const maybeDailyPush = (now) => {
     try {
-      const r = await sendPush(title, body)
-      log(`推送[${effectivePushChannel()}]${r.ok ? '成功' : '失败（HTTP ' + r.status + '）'} · ${n} 条`)
+      if (effectivePushChannel() === 'off') return
+      const at = String(cfg.pushDailyAt || '').trim()
+      const m = /^(\d{1,2}):(\d{2})$/.exec(at)
+      if (!m) return
+      const cur = now.getHours() * 60 + now.getMinutes()
+      if (cur < Number(m[1]) * 60 + Number(m[2])) return        // 还没到点
+      const st = readJson(pushStateFile, {})
+      if (st.day === dayKey(now)) return                         // 今天已处理过
+      const picks = (() => {
+        try { return harvestReport(reportFileOf(now)).filter((e) => e.picked) } catch { return [] }
+      })()
+      // 先落账再发：发送中绝不会被下一次 tick 重复触发
+      try { writeFileSync(pushStateFile, JSON.stringify({ day: dayKey(now), at: new Date().toISOString() }), 'utf8') } catch { /* 记不上也照推 */ }
+      if (!picks.length) {
+        log('每日推送：今天没有挑中的视频，不推')
+        return
+      }
+      const title = `🐟 今日鱼塘日报 · ${picks.length} 条`
+      const body = picks.slice(0, 15).map((e, i) => `${i + 1}. ${e.title || e.bvid}\nhttps://www.bilibili.com/video/${e.bvid}`).join('\n\n')
+      Promise.resolve(sendPush(title, body))
+        .then((r) => log(`每日推送[${effectivePushChannel()}]${r?.ok ? '成功' : '失败（HTTP ' + r?.status + '）'} · ${picks.length} 条`))
+        .catch((e) => log(`每日推送失败（不影响值班）：${e?.message ?? e}`))
     } catch (e) {
-      log(`推送失败（不影响值班）：${e?.message ?? e}`)
+      log(`每日推送异常（不影响值班）：${e?.message ?? e}`)
     }
   }
 
@@ -4033,7 +4050,7 @@ const pondAccount = async () => {
         // 2026-10-30 内容来源与过滤（推荐流 bili_feed / 广告引流过滤 / 自定义屏蔽词）
         'sourceMode', 'sources', 'filterAds', 'filterSpam', 'blockWords', 'allowWords', 'minUpFans',
         // 2026-10-31 推送渠道
-        'pushChannel', 'pushUrl', 'pushHeaders', 'onebotUrl', 'onebotToken', 'onebotTarget', 'onebotGroup', 'qqAppId', 'qqAppSecret', 'qqOpenid',
+        'pushChannel', 'pushUrl', 'pushHeaders', 'pushDailyAt', 'onebotUrl', 'onebotToken', 'onebotTarget', 'onebotGroup', 'qqAppId', 'qqAppSecret', 'qqOpenid',
         // 2026-10-22 守护评论区（骑士团）
         'guardOn', 'guardWhitelist', 'guardOwnAll', 'guardDailyCap', 'guardScope', 'guardPerRound', 'guardPollMinutes', 'guardEmoji', 'guardTone',
         // 2026-10-25 点赞与收藏
