@@ -119,7 +119,7 @@ export const Config = !z ? undefined : z.object({
    *  · mixed  = 推荐为主，配额还剩时用关键词补
    *  · search = 旧行为，只按关键词搜
    *  过滤在 MCP 层做（确定性规则、零 token）：广告 / 引流小号 / 自定义屏蔽词。 */
-  /** 内容来源：feed（默认）/ mixed / search */
+  /** 内容来源：feed（默认）/ follow / mixed / search */
   sourceMode: z.string().default('feed').extra('volatile', true),
   /** 挡明显广告（优惠/秒杀/带货/广告合作…标题或简介命中即跳过） */
   filterAds: z.boolean().default(true).extra('volatile', true),
@@ -127,8 +127,16 @@ export const Config = !z ? undefined : z.object({
   filterSpam: z.boolean().default(true).extra('volatile', true),
   /** 自定义屏蔽词：标题/简介/UP 名命中即跳过（过滤开关全关时这条也生效） */
   blockWords: z.array(z.string()).default([]).extra('volatile', true),
+  /** 放行词（白名单）：标题/简介/UP 名命中就跳过所有过滤 —— 误杀豁免用 */
+  allowWords: z.array(z.string()).default([]).extra('volatile', true),
   /** UP 粉丝数下限（0 = 不查；>0 时会对候选查粉丝数，多打 user 接口） */
   minUpFans: z.natural().default(0).extra('volatile', true),
+  /**
+   * 日报推送 webhook（留空 = 不推）。每轮跑完、真挑中了东西就推一条：
+   *  · URL 里带 {title}/{body} 占位符 ⇒ 按模板替换后 GET（**Bark 风格**：`https://api.day.app/<key>/{title}/{body}`）；
+   *  · 没有占位符 ⇒ POST JSON `{title, body}`（钉钉/企业微信/QQ bot 桥都能接）。
+   */
+  pushUrl: z.string().default('').extra('volatile', true),
   /** Python：指向 venv 里的那个最好 */
   pythonPath: z.string().default('python').extra('volatile', true),
   /** dsh 的 bin.js（不填就试自动探测，再退化成 shell 里的 dsh） */
@@ -366,7 +374,7 @@ const pondAccount = async () => {
     noon: true, night: true, autoComment: false, circleMode: false, transcribe: false, asrModel: 'small',
     dmOn: false, dmMode: 'off', dmUid: 0,
     keywords: [], commentPerRound: 1, mentionName: '', mentionUid: 0, pythonPath: 'python', dshBin: '', headlessProfile: 'headless', dutyProvider: '', dutyModel: '', overlayMcp: true, reuseRoutes: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
-    sourceMode: 'feed', filterAds: true, filterSpam: true, blockWords: [], minUpFans: 0,
+    sourceMode: 'feed', filterAds: true, filterSpam: true, blockWords: [], allowWords: [], minUpFans: 0, pushUrl: '',
     guardOn: false, guardWhitelist: '', guardOwnAll: true, guardDailyCap: 30, guardScope: 1, guardPerRound: 3, guardPollMinutes: 3, guardEmoji: true, guardTone: '',
     likeOn: false, likePerRound: 1, likePerDay: 3, likeRule: 'standard', likeRuleExtra: '', favOn: false, favPerDay: 2,
   }
@@ -419,11 +427,13 @@ const pondAccount = async () => {
     num('perDayMax', 0, 240, 30)             // 每天最多挑几条（2026-10-30 从 20/120 抬到 30/240）
     num('transcribePerDay', 0, 50, 10)       // 每日转写熔断
     /* ── 2026-10-30 内容来源与过滤 ── */
-    if ('sourceMode' in p) p.sourceMode = ['feed', 'mixed', 'search'].includes(String(p.sourceMode)) ? String(p.sourceMode) : 'feed'
+    if ('sourceMode' in p) p.sourceMode = ['feed', 'follow', 'mixed', 'search'].includes(String(p.sourceMode)) ? String(p.sourceMode) : 'feed'
     if ('filterAds' in p) p.filterAds = Boolean(p.filterAds)
     if ('filterSpam' in p) p.filterSpam = Boolean(p.filterSpam)
     if ('blockWords' in p) p.blockWords = Array.isArray(p.blockWords) ? p.blockWords.filter((x) => typeof x === 'string').map((s) => s.trim()).filter(Boolean) : []
+    if ('allowWords' in p) p.allowWords = Array.isArray(p.allowWords) ? p.allowWords.filter((x) => typeof x === 'string').map((s) => s.trim()).filter(Boolean) : []
     num('minUpFans', 0, 1000000, 0)          // UP 粉丝数下限（0 = 不查）
+    if ('pushUrl' in p) p.pushUrl = String(p.pushUrl || '').trim().slice(0, 500)
 
     /* ⭐ 评论上限不能超过每轮挑中数（2026-10-20）
      *    评论的对象只能是"这一轮挑中的视频" ⇒ 挑 3 条却想发 5 条评论是不可能发生的，
@@ -1121,8 +1131,9 @@ const pondAccount = async () => {
   tool({
     name: 'bili_config',
     description: '读 / 改「B站鱼塘」的设置。不给 `patch` 就是读；给了就改（只认 schema 里的字段）。\n'
-      + '例：`{"autoRun":true,"perRoundMax":5,"perDayMax":30,"sourceMode":"feed"}`（内容来源 feed=推荐流 / mixed=推荐+关键词 / search=只搜关键词）；'
-      + '过滤：`{"filterAds":true,"filterSpam":true,"blockWords":["原神","手游"]}`；'
+      + '例：`{"autoRun":true,"perRoundMax":5,"perDayMax":30,"sourceMode":"feed"}`（内容来源 feed=推荐流 / follow=关注动态 / mixed=推荐+关键词 / search=只搜关键词）；'
+      + '过滤：`{"filterAds":true,"filterSpam":true,"blockWords":["原神","手游"],"allowWords":["开放世界"]}`；'
+      + '日报推送：`{"pushUrl":"https://api.day.app/<key>/{title}/{body}"}`；'
       + '评论与私信是两个独立开关：`{"autoComment":true,"mentionUid":14430149,"dmOn":true,"dmUid":12345678}`。',
     parameters: { patch: { type: 'object', additionalProperties: true, description: '要改的字段（可省）' } },
     async execute(args) {
@@ -1404,7 +1415,7 @@ const pondAccount = async () => {
     /* ⭐ 内容来源与过滤（2026-10-30 重构）：
      *    feed = 只看推荐流（默认）· mixed = 推荐为主关键词补 · search = 旧行为只搜关键词。
      *    pool = 建议模型一次拉多少条推荐（每轮配额 ×2，钳在 6–30；MCP 那头最多给 30）。 */
-    const mode = ['feed', 'mixed', 'search'].includes(String(cfg.sourceMode)) ? String(cfg.sourceMode) : 'feed'
+    const mode = ['feed', 'follow', 'mixed', 'search'].includes(String(cfg.sourceMode)) ? String(cfg.sourceMode) : 'feed'
     const pool = Math.min(30, Math.max(6, left * 2))
     const bw = Array.isArray(cfg.blockWords) ? cfg.blockWords.filter(Boolean) : []
     const filterOn = Boolean(cfg.filterAds || cfg.filterSpam || bw.length || Number(cfg.minUpFans) > 0)
@@ -1457,7 +1468,9 @@ const pondAccount = async () => {
           : '')
         : '')
       /* ── 内容来源与过滤（2026-10-30 重构：推荐流 bili_feed 进场，关键词降级为可选项） ── */
-      + (mode === 'search'
+      + (mode === 'follow'
+        ? `内容来源：**关注动态** —— 用 \`bili_follow_feed\` 拉你关注 UP 主的最新投稿（要登录且有关注；UP 一发新视频这里就有，比推荐流及时）。一次拉 ps=${pool} 条，不够再翻一页（pn+1），**不要**按关键词搜视频。`
+        : mode === 'search'
         ? `内容来源：**关键词搜索**（bili_search）—— 关键词${kws.length ? `用这些：${kws.join('、')}` : '用章程里的默认那几组'}。`
         : mode === 'mixed'
           ? `内容来源：**推荐流为主、关键词补充** —— 先用 \`bili_feed\` 拉推荐流（一次拉 ps=${pool} 条，够这一轮挑），配额还剩很多时再用关键词搜索补一轮（bili_search），关键词${kws.length ? `用这些：${kws.join('、')}` : '用章程里的默认那几组'}。`
@@ -1570,7 +1583,7 @@ const pondAccount = async () => {
      *    `out/` 报告、`seen.md` 判重表、归档 ✗（实测 `[sandbox: file access denied]`）。
      *    ⇒ 这三件事改由 MCP 子进程代劳（子进程是宿主起的，不受那一轮的沙箱限制），
      *      工具名刻意收窄：报告 / 判重表 / 归档各自一个，**不给通用文件工具** ✓ */
-    const list = ['bili_feed', 'bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info', 'bili_user_info',
+    const list = ['bili_feed', 'bili_follow_feed', 'bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info', 'bili_user_info',
       'bili_report_save', 'bili_seen_read', 'bili_seen_append', 'bili_archive_append',
       'bili_memory_append', 'bili_diary_write', 'bili_say']
     if (circleOnForWhitelist()) list.push('bili_circle_scan', 'bili_circle_reply')
@@ -1865,6 +1878,7 @@ const pondAccount = async () => {
         `          BILI_FILTER_ADS: '${cfg.filterAds ? '1' : '0'}'`,
         `          BILI_FILTER_SPAM: '${cfg.filterSpam ? '1' : '0'}'`,
         `          BILI_FILTER_WORDS: '${String((Array.isArray(cfg.blockWords) ? cfg.blockWords : []).join('|')).replace(/'/g, '')}'`,
+        `          BILI_FILTER_ALLOW: '${String((Array.isArray(cfg.allowWords) ? cfg.allowWords : []).join('|')).replace(/'/g, '')}'`,
         `          BILI_FILTER_MIN_FANS: '${Math.max(0, Number(cfg.minUpFans) || 0)}'`,
         '',
       )
@@ -2028,6 +2042,9 @@ const pondAccount = async () => {
      *    人设（AGENTS.md）仍由宿主从「工作区」读进来、内联进提示词，跟跑在哪无关。 */
     const cwd = stateDir
     log(`开跑（${why === 'manual' ? '手动' : why === 'noon' ? '中午' : why === 'night' ? '夜间' : why}）· 模型 ${cfg.dutyProvider || '跟随默认'}/${cfg.dutyModel || '默认'} · 本轮上限 ${Number(cfg.perRoundMax) || 0} 条`)
+    const pickedBefore = (() => {
+      try { return harvestReport(reportFileOf(new Date())).filter((e) => e.picked).map((e) => e.bvid) } catch { return [] }
+    })()   // 轮末算"这轮新增了哪几条"用 —— webhook 只推新挑的，不重推旧账
     const child = spawn(dsh.command, args, {
       cwd,
       shell: dsh.shell,
@@ -2103,6 +2120,20 @@ const pondAccount = async () => {
         log(`结束 · 用时 ${fmtDur(tookSec)} · 本轮挑中 ${pickedNow} 条（今天共 ${countPickedToday()} 条）`)
         // 这一轮成了 ⇒ 清掉上一次的失败记录（否则界面会一直挂着早就好了的错误）
         try { if (readJson(dutyStateFile, {}).lastError) bumpState({ lastError: null }) } catch { /* 清不掉也不影响 */ }
+        /* ⭐ 2026-10-31 轮末两件事（都是 best-effort，绝不影响值班）：
+         *    ① 漂移检测：推荐流/关注动态连续几轮 0 挑中 ⇒ 状态页挂提醒；
+         *    ② webhook 推送：把**这一轮新挑中**的条目推出去（设置了推送 URL 才推）。 */
+        let added = pickedNow - pickedBefore.length
+        let newPicks = []
+        try {
+          const before = new Set(pickedBefore)
+          newPicks = harvestReport(reportFileOf(new Date())).filter((e) => e.picked && !before.has(e.bvid))
+          if (newPicks.length) added = newPicks.length
+        } catch { /* 报告读不了就用计数差 */ }
+        try { bumpDrift(added) } catch (e) { log(`漂移记账异常（不影响值班）：${e?.message ?? e}`) }
+        if (String(cfg.pushUrl || '').trim()) {
+          Promise.resolve(pushRoundDigest(newPicks, tookSec)).catch((e) => log(`推送异常（不影响值班）：${e?.message ?? e}`))
+        }
       } else {
         log(`结束但没成功 · 用时 ${fmtDur(tookSec)} · ${fail.hint}`)
         bumpState({ lastError: { at: new Date().toISOString(), ...fail } })
@@ -2815,6 +2846,72 @@ const pondAccount = async () => {
     } catch { /* 还没记过账 */ }
     return { day, rounds, tokens: i + c + o, in: i, cache: c, out: o }
   }
+  /* 近 N 天的用量聚合（周概览用）：按天分组，老账本没有的天就是 0 */
+  const readUsageDays = (days = 7) => {
+    const out = new Map()
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(Date.now() - i * 86_400_000)
+      out.set(dayKey(d), { date: dayKey(d), tokens: 0, rounds: 0 })
+    }
+    try {
+      const txt = readFileSync(usageLogFile, 'utf8')
+      for (const line of txt.split(/\r?\n/)) {
+        if (!line.trim()) continue
+        let r; try { r = JSON.parse(line) } catch { continue }
+        const row = out.get(r.day)
+        if (!row) continue
+        row.tokens += (Number(r.in) || 0) + (Number(r.cache) || 0) + (Number(r.out) || 0)
+        row.rounds += 1
+      }
+    } catch { /* 还没记过账 */ }
+    return [...out.values()]
+  }
+
+  /* ⭐ 日报推送（2026-10-31）：每轮跑完把挑中的条目推到 webhook（设置页「推送 Webhook」）。
+   *    · URL 里带 {title}/{body} 占位符 ⇒ 模板替换后 GET（**Bark 风格**：https://api.day.app/<key>/{title}/{body}）
+   *    · 没占位符 ⇒ POST JSON {title, body}（钉钉 / 企业微信 / QQ bot 桥都能接）
+   *    🔴 best-effort：失败只记日志，绝不影响值班本身。 */
+  const pushRoundDigest = async (picks, tookSec) => {
+    const url = String(cfg.pushUrl || '').trim()
+    if (!url || !/^https?:\/\//i.test(url)) return
+    const n = picks.length
+    const title = n > 0 ? `🐟 鱼塘本轮挑中 ${n} 条` : '🐟 鱼塘本轮没挑中'
+    const body = n > 0
+      ? picks.slice(0, 10).map((e, i) => `${i + 1}. ${e.title || e.bvid}\nhttps://www.bilibili.com/video/${e.bvid}`).join('\n\n')
+      : `这一轮跑完了（用时 ${fmtDur(tookSec)}），没有值得推给你的新视频。`
+    try {
+      let r
+      if (/\{title\}/.test(url) || /\{body\}/.test(url)) {
+        const filled = url.replaceAll('{title}', encodeURIComponent(title)).replaceAll('{body}', encodeURIComponent(body))
+        r = await fetch(filled, { signal: AbortSignal.timeout(10_000) })
+      } else {
+        r = await fetch(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ title, body }),
+          signal: AbortSignal.timeout(10_000),
+        })
+      }
+      log(`推送${r.ok ? '成功' : '失败（HTTP ' + r.status + '）'} · ${n} 条`)
+    } catch (e) {
+      log(`推送失败（不影响值班）：${e?.message ?? e}`)
+    }
+  }
+
+  /* ⭐ 口味漂移检测（2026-10-31）：推荐流/关注动态连续几轮「跑成了但 0 挑中」，多半是内容跑偏 ——
+   *    连续 ≥3 轮在状态里挂提醒（0 挑中也可能只是"都看过了"，所以只是提醒，不是错误）。 */
+  const driftFile = join(stateDir, 'drift.json')
+  const readDrift = () => {
+    const j = readJson(driftFile, {})
+    return Number(j.streak) || 0
+  }
+  const bumpDrift = (added) => {
+    const feedish = ['feed', 'follow', 'mixed'].includes(String(cfg.sourceMode))
+    const streak = feedish && added <= 0 ? readDrift() + 1 : 0
+    try { writeFileSync(driftFile, JSON.stringify({ streak }), 'utf8') } catch { /* 记不上就算了 */ }
+    if (streak >= 3) log(`⚠️ 连续 ${streak} 轮没挑中 —— 推荐流可能跑偏了，考虑切「推荐为主 + 关键词补充」或改自定义屏蔽词`)
+    return streak
+  }
 
   const modelsHere = async () => {
     const llm = ctx.get?.('llm')
@@ -3289,6 +3386,19 @@ const pondAccount = async () => {
         } catch { out.steps.push('推荐流返回异常（没解析出 JSON）') }
       } catch (e) { out.steps.push('推荐流拉不动：' + String(e?.message ?? e).slice(0, 80)) }
     }
+    /* ⭐ 2026-10-31：关注动态档顺带真拉一次 —— 没关注任何 UP / 动态接口异常，这里当场看见 */
+    if (out.ok && cfg.sourceMode === 'follow') {
+      try {
+        const f = await call('bili_follow_feed', { pn: 1, ps: 3 })
+        const j = (() => { try { return JSON.parse(typeof f === 'string' ? f : JSON.stringify(f)) } catch { return null } })()
+        if (j && j.ok === false) out.steps.push(`关注动态不可用：${j.error || '未知错误'}`)
+        else {
+          out.steps.push(`关注动态正常（拿到 ${j?.count ?? '?'} 条，过滤掉 ${j?.filtered ?? 0} 条）`)
+          const titles = (j?.videos || []).slice(0, 2).map((v) => v.title).filter(Boolean)
+          if (titles.length) out.steps.push(`关注动态前两条：${titles.join(' / ')}`)
+        }
+      } catch (e) { out.steps.push('关注动态拉不动：' + String(e?.message ?? e).slice(0, 80)) }
+    }
     return out
   }
 
@@ -3345,6 +3455,8 @@ const pondAccount = async () => {
       // ── 2026-10-20 自动运行 / 配额 / 熔断 的可观测值 ──
       asrUsedToday: asrUsedToday(),
       roundsToday: roundsToday(),
+      // ⭐ 口味漂移（2026-10-31）：推荐流/关注动态连续几轮 0 挑中 —— 前端据此挂提醒
+      driftStreak: readDrift(),
       lastRunAt: st.lastRunAt || null,
       lastWhy: st.lastWhy || null,
       // ⭐ 实时进度（2026-10-20）：这一轮在不在跑、跑了多久 —— 设置页据此决定要不要轮询日志
@@ -3639,6 +3751,65 @@ const pondAccount = async () => {
       }
     }
     /* ⭐ 大肥鱼整页：一次拿全（统计 + 历史 + 记忆 + 日记 + 守护记录），客户端只发一个请求 */
+    /* ⭐ 本周概览（2026-10-31）：近 7 天产出与开销 —— 挑中数、token 用量、跳过原因 top、漂移状态。
+     *    数据全从现成账本里聚（报告 harvestReport + usage-log.jsonl），不新增任何记账。 */
+    if (req.method === 'GET' && path === '/api/bili-pond/insights') {
+      const days = []
+      let totalPicked = 0, totalTokens = 0, totalRounds = 0
+      const usage = readUsageDays(7)
+      const skipTally = new Map()
+      for (let i = 6; i >= 0; i--) {
+        const d = new Date(Date.now() - i * 86_400_000)
+        const date = dayKey(d)
+        let picked = 0, entries = []
+        try {
+          entries = harvestReport(reportFileOf(d))
+          picked = entries.filter((e) => e.picked).length
+          for (const e of entries) {
+            const r = String(e.skipReason || '').trim()
+            if (r && !e.picked) skipTally.set(r, (skipTally.get(r) || 0) + 1)
+          }
+        } catch { /* 那天没报告就是 0 */ }
+        const u = usage.find((x) => x.date === date) || { tokens: 0, rounds: 0 }
+        totalPicked += picked
+        totalTokens += u.tokens
+        totalRounds += u.rounds
+        days.push({ date, picked, tokens: u.tokens, rounds: u.rounds })
+      }
+      const skipTop = [...skipTally.entries()].map(([reason, n]) => ({ reason, n }))
+        .sort((a, b) => b.n - a.n).slice(0, 5)
+      return sendJson(res, 200, {
+        ok: true,
+        days,
+        totalPicked,
+        totalTokens,
+        totalRounds,
+        avgPerPick: totalPicked > 0 ? Math.round(totalTokens / totalPicked) : 0,
+        skipTop,
+        drift: readDrift(),
+        driftHint: readDrift() >= 3
+          ? `连续 ${readDrift()} 轮没挑中 —— 推荐流可能跑偏了，考虑切「推荐为主 + 关键词补充」或改自定义屏蔽词`
+          : '',
+      })
+    }
+
+    /* ⭐ 过滤记录（2026-10-31）：MCP 层写 filter-log.jsonl，这里读给设置页看 —— 误杀好反推白名单 */
+    if (req.method === 'GET' && path === '/api/bili-pond/filter-log') {
+      const url = new URL(req.url, 'http://127.0.0.1')
+      const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit') || 50)))
+      const f = join(stateDir, 'filter-log.jsonl')
+      let items = []
+      try {
+        const txt = readFileSync(f, 'utf8')
+        const lines = txt.split(/\r?\n/).filter((l) => l.trim()).slice(-limit)
+        for (const line of lines) {
+          try { items.push(JSON.parse(line)) } catch { /* 坏行跳过 */ }
+        }
+      } catch { /* 还没过滤过任何东西 */ }
+      items.reverse()   // 新的在前
+      return sendJson(res, 200, { ok: true, items })
+    }
+
     if (req.method === 'GET' && path === '/api/bili-pond/pond') {
       const url = new URL(req.url, 'http://127.0.0.1')
       const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit') || 60)))
@@ -3708,7 +3879,7 @@ const pondAccount = async () => {
         'minDurationMin', 'maxDurationMin', 'preferSubtitle', 'subtitleProbeMax',
         'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'dutyProvider', 'dutyModel', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound',
         // 2026-10-30 内容来源与过滤（推荐流 bili_feed / 广告引流过滤 / 自定义屏蔽词）
-        'sourceMode', 'filterAds', 'filterSpam', 'blockWords', 'minUpFans',
+        'sourceMode', 'filterAds', 'filterSpam', 'blockWords', 'allowWords', 'minUpFans', 'pushUrl',
         // 2026-10-22 守护评论区（骑士团）
         'guardOn', 'guardWhitelist', 'guardOwnAll', 'guardDailyCap', 'guardScope', 'guardPerRound', 'guardPollMinutes', 'guardEmoji', 'guardTone',
         // 2026-10-25 点赞与收藏

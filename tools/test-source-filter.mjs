@@ -81,7 +81,7 @@ console.log('\n=== ② POST /config：钳制与清洗 ===')
   cleanup()
 }
 
-console.log('\n=== ③ POST /config：合法值能写进去 ===')
+console.log('\n=== ④ POST /config：合法值能写进去 ===')
 {
   const { call, cleanup } = await loadWith({})
   await call('POST', '/api/bili-pond/config', JSON.stringify({ sourceMode: 'mixed', filterSpam: false }))
@@ -90,6 +90,43 @@ console.log('\n=== ③ POST /config：合法值能写进去 ===')
   ok(c.sourceMode === 'mixed', 'sourceMode=mixed 能写入', String(c.sourceMode))
   ok(c.filterSpam === false, 'filterSpam=false 能写入', String(c.filterSpam))
   ok(c.filterAds === true, 'filterSpam 关掉不影响 filterAds', String(c.filterAds))
+  cleanup()
+}
+
+console.log('\n=== ⑤ 关注动态档 + 放行词 + 推送 URL（2026-10-31 批量） ===')
+{
+  const { call, cleanup } = await loadWith({})
+  const r = await call('POST', '/api/bili-pond/config', JSON.stringify({
+    sourceMode: 'follow', allowWords: [' 学英语 ', ''], pushUrl: '  https://api.day.app/k/{title}/{body}  ',
+  }))
+  const c = r.config || {}
+  console.log('   →', JSON.stringify({ sourceMode: c.sourceMode, allowWords: c.allowWords, pushUrl: c.pushUrl }))
+  ok(c.sourceMode === 'follow', 'sourceMode=follow 是合法档位', String(c.sourceMode))
+  ok(JSON.stringify(c.allowWords) === JSON.stringify(['学英语']), 'allowWords 清洗：去空白去空串', JSON.stringify(c.allowWords))
+  ok(c.pushUrl === 'https://api.day.app/k/{title}/{body}', 'pushUrl 保存时去首尾空白', String(c.pushUrl))
+  const bad = await call('POST', '/api/bili-pond/config', JSON.stringify({ sourceMode: 'bogus2' }))
+  ok(bad.config?.sourceMode === 'feed', '非法档位回退 feed', String(bad.config?.sourceMode))
+  cleanup()
+}
+
+console.log('\n=== ⑥ insights 聚合 + filter-log 路由（smoke） ===')
+{
+  const { call, cleanup } = await loadWith({})
+  const ins = await call('GET', '/api/bili-pond/insights')
+  ok(ins?.ok === true, 'insights 返回 ok', JSON.stringify(ins).slice(0, 80))
+  ok(Array.isArray(ins?.days) && ins.days.length === 7, 'insights.days 是近 7 天', String(ins?.days?.length))
+  ok(typeof ins?.totalPicked === 'number' && typeof ins?.totalTokens === 'number', 'insights 带挑中数与 token 合计')
+  ok(typeof ins?.drift === 'number', 'insights 带漂移计数（新装应为 0）', String(ins?.drift))
+  const fl = await call('GET', '/api/bili-pond/filter-log')
+  ok(fl?.ok === true && Array.isArray(fl?.items) && fl.items.length === 0, 'filter-log 新装为空数组', JSON.stringify(fl).slice(0, 60))
+  cleanup()
+}
+
+console.log('\n=== ⑥ status 带漂移字段 ===')
+{
+  const { call, cleanup } = await loadWith({})
+  const st = await call('GET', '/api/bili-pond/status')
+  ok(typeof st?.driftStreak === 'number', 'status 暴露 driftStreak', JSON.stringify(st?.driftStreak))
   cleanup()
 }
 

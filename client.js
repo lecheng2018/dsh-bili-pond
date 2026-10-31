@@ -784,6 +784,11 @@ window.__ModuleLoader__.load({
       const [filterSpam, setFilterSpam] = React.useState(null)  // 挡引流小号
       const [blockWords, setBlockWords] = React.useState(null)  // 自定义屏蔽词（每行一个）
       const [minUpFans, setMinUpFans] = React.useState(null)    // UP 粉丝数下限（0 = 不查）
+      const [allowWords, setAllowWords] = React.useState(null)  // 放行词/白名单（每行一个）
+      const [pushUrl, setPushUrl] = React.useState(null)        // 日报推送 webhook（Bark 模板或 POST JSON）
+      const [filterLog, setFilterLog] = React.useState(null)    // 过滤记录（展开才拉）
+      const [filterLogOpen, setFilterLogOpen] = React.useState(false)
+      const [insights, setInsights] = React.useState(null)      // 本周概览（近 7 天产出与开销）
       const [mention, setMention] = React.useState(null)
       const [mentionUid, setMentionUid] = React.useState(null)
       const [mentionInfo, setMentionInfo] = React.useState(null)   // { name, face, level } 或 { error }
@@ -891,6 +896,8 @@ window.__ModuleLoader__.load({
         if (cfg && filterSpam === null) setFilterSpam(cfg.filterSpam !== false)
         if (cfg && blockWords === null) setBlockWords((cfg.blockWords || []).join('\n'))
         if (cfg && minUpFans === null) setMinUpFans(String(cfg.minUpFans ?? 0))
+        if (cfg && allowWords === null) setAllowWords((cfg.allowWords || []).join('\n'))
+        if (cfg && pushUrl === null) setPushUrl(String(cfg.pushUrl ?? ''))
         if (cfg && likePerRound === null) setLikePerRound(String(cfg.likePerRound ?? 1))
         if (cfg && likePerDay === null) setLikePerDay(String(cfg.likePerDay ?? 3))
         if (cfg && likeRule === null) setLikeRule(String(cfg.likeRule ?? 'standard'))
@@ -909,6 +916,25 @@ window.__ModuleLoader__.load({
         if (guardOn) { loadGuardLog() } else { setGuardLog(null) }
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, [guardOn])
+
+      /* ⭐ 过滤记录（2026-10-31）：展开才拉 —— MCP 层写的 filter-log.jsonl，误杀好反推白名单 */
+      const loadFilterLog = async () => {
+        try { setFilterLog(await jget('/filter-log?limit=30')) } catch { /* 网络抖一下就跳过 */ }
+      }
+      React.useEffect(() => {
+        if (filterLogOpen) loadFilterLog()
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [filterLogOpen])
+
+      /* ⭐ 本周概览（2026-10-31）：近 7 天产出与开销（挂载时拉一次 + 手动刷新） */
+      const loadInsights = async () => {
+        try { setInsights(await jget('/insights')) } catch { /* 网络抖一下就跳过 */ }
+      }
+      React.useEffect(() => { loadInsights() }, [])
+      const fmtTokens = (n) => {
+        n = Number(n) || 0
+        return n >= 100_000_000 ? (n / 1e8).toFixed(1) + '亿' : n >= 10_000 ? (n / 1e4).toFixed(1) + '万' : String(n)
+      }
 
       /* 今日点赞 / 收藏计数：跟 /status 同频（5 秒）拉一次 —— 指标栏和历史页共用这一份口径 */
       React.useEffect(() => {
@@ -1506,6 +1532,23 @@ window.__ModuleLoader__.load({
 
         h(Divider),
 
+        h(Card, { title: '本周概览', desc: '近 7 天产出与开销 —— 挑中几条、用了多少 token、都在跳过什么' },
+          !insights ? h('div', { 'data-bd-row-desc': '' }, '加载中…（后端没回包就说明版本还没更新）')
+            : h('div', {},
+              h('div', { 'data-bd-row-desc': '' },
+                `近 7 天：挑中 ${insights.totalPicked ?? 0} 条 · 跑了 ${insights.totalRounds ?? 0} 轮 · 用了 ${fmtTokens(insights.totalTokens)} token`
+                + (insights.avgPerPick ? ` · 平均每条 ${fmtTokens(insights.avgPerPick)}` : '')),
+              h('div', { 'data-bd-row-desc': '' },
+                '逐日挑中：' + ((insights.days || []).map((d) => `${String(d.date || '').slice(5)}:${d.picked}条`).join(' · ') || '暂无')),
+              Array.isArray(insights.skipTop) && insights.skipTop.length
+                ? h('div', { 'data-bd-row-desc': '' }, '跳过最多：' + insights.skipTop.map((s) => `${s.reason} ×${s.n}`).join('、'))
+                : null,
+              insights.driftHint ? h('div', { 'data-bd-row-desc': '' }, '⚠️ ' + insights.driftHint) : null,
+              h('div', { 'data-bd-row-desc': '' },
+                h('a', { href: '#', onClick: (e) => { e.preventDefault(); loadInsights() } }, '刷新')))),
+
+        h(Divider),
+
         h(Card, { title: '内容来源', desc: '决定每轮从哪拿候选视频（2026-10-30 起不再只能按关键词搜）' },
           h(Row, {
             label: '刷什么',
@@ -1515,10 +1558,13 @@ window.__ModuleLoader__.load({
             onChange: (e) => { setSourceMode(e.target.value); patch({ sourceMode: e.target.value }, '内容来源') },
           },
             h('option', { value: 'feed' }, '只看推荐流'),
+            h('option', { value: 'follow' }, '只看关注动态'),
             h('option', { value: 'mixed' }, '推荐为主 + 关键词补充'),
             h('option', { value: 'search' }, '只按关键词搜（旧行为）'))),
           String(sourceMode ?? 'feed') === 'feed' ? h('div', { 'data-bd-row-desc': '' },
             '机器人替你刷首页「推荐」：B站推什么它看什么，下面的「检索关键词」这一档用不上。') : null,
+          String(sourceMode ?? 'feed') === 'follow' ? h('div', { 'data-bd-row-desc': '' },
+            '机器人替你刷「关注动态」：你关注的 UP 一发新视频它就看到（要登录且有关注）。') : null,
           String(sourceMode ?? 'feed') === 'mixed' ? h('div', { 'data-bd-row-desc': '' },
             '先拉推荐流；配额还剩很多时，再用下面的「检索关键词」补一轮搜索。') : null),
 
@@ -1594,7 +1640,32 @@ window.__ModuleLoader__.load({
             value: minUpFans ?? '',
             onChange: (e) => setMinUpFans(e.target.value),
             onBlur: () => { const n = Math.max(0, Math.min(Number(minUpFans) || 0, 1000000)); setMinUpFans(String(n)); patch({ minUpFans: n }, 'UP 粉丝数下限') },
-          }))),
+          })),
+          h(StackRow, {
+            label: '放行词（白名单）',
+            hint: '每行一个；标题/简介/UP 名命中就跳过所有过滤 —— 误杀豁免用',
+          }, h('textarea', {
+            'data-bd-textarea': '', rows: 2,
+            placeholder: '每行一个（留空 = 不豁免任何词）',
+            value: allowWords ?? '',
+            onChange: (e) => setAllowWords(e.target.value),
+            onBlur: () => {
+              const list = String(allowWords ?? '').split('\n').map((s) => s.trim()).filter(Boolean)
+              if (list.join('\n') === (cfg?.allowWords || []).join('\n')) return
+              patch({ allowWords: list }, '放行词')
+            },
+          })),
+          h(SwitchRow, {
+            label: '最近过滤记录',
+            desc: '展开看最近被挡掉的视频和原因 —— 误杀了就去「放行词」加一条',
+            on: Boolean(filterLogOpen),
+            onChange: (v) => setFilterLogOpen(v),
+          }),
+          filterLogOpen && Array.isArray(filterLog?.items) ? h('div', { 'data-bd-sub': '' },
+            filterLog.items.length === 0
+              ? h('div', { 'data-bd-row-desc': '' }, '还没有过滤记录 —— 跑完一轮后这里会有。')
+              : filterLog.items.map((e, i) => h('div', { key: i, 'data-bd-row-desc': '' },
+                `${String(e.t || '').slice(5, 16).replace('T', ' ')} · ${String(e.title || e.bvid || '').slice(0, 30)} —— ${e.reason || ''}`))) : null),
 
         h(Divider),
 
@@ -1626,7 +1697,21 @@ window.__ModuleLoader__.load({
           },
             h('option', { value: 'full' }, '完整'),
             h('option', { value: 'brief' }, '简要'),
-            h('option', { value: 'off' }, '不生成')))),
+            h('option', { value: 'off' }, '不生成'))),
+          h(Row, {
+            label: '推送 Webhook',
+            hint: '留空不推。Bark 模板：https://api.day.app/<key>/{title}/{body}；其他填 POST JSON 的地址',
+          }, h('input', {
+            'data-bd-input': '', type: 'text',
+            value: pushUrl ?? '',
+            placeholder: 'https://…（{title}/{body} 占位符按模板替换）',
+            onChange: (e) => setPushUrl(e.target.value),
+            onBlur: () => {
+              const v = String(pushUrl ?? '').trim()
+              if (v === String(cfg?.pushUrl || '')) return
+              patch({ pushUrl: v }, '推送 Webhook')
+            },
+          }))),
 
         /* ══ ⑦ 发布与互动 ══════════════════════════════════════════════
        * ⭐ 2026-10-20 合并：原来「自动发布评论」和「回复楼中楼」是两个独立开关，

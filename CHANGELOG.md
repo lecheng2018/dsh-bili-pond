@@ -1,5 +1,27 @@
 # 更新日志
 
+## 1.5.0（2026-10-31）
+
+- **关注动态源**：内容来源新增第四档「只看关注动态」—— 新增 `bili_follow_feed` 工具
+  （`x/polymer/web-dynamic/v1/feed/all?type=video`，登录态），拉**已关注 UP 主**的最新视频投稿，
+  追更比推荐流及时；动态卡片简介缺失时同样走 view 缓存补全再过筛。
+- **过滤可运维**：被挡条目落 `filter-log.jsonl`（时间/BV/标题/规则，超 300KB 自动瘦身），
+  新增 `GET /api/bili-pond/filter-log` 与设置页「最近过滤记录」展开查看；新增「**放行词（白名单）**」
+  `allowWords` —— 命中就跳过所有过滤规则，误杀豁免。
+- **日报推送 Webhook**：新配置 `pushUrl`。URL 带 `{title}/{body}` 占位符 ⇒ 模板替换后请求
+  （**Bark 风格**）；没有占位符 ⇒ POST JSON `{title, body}`。每轮跑完推**新挑中**的条目，
+  best-effort，失败只记日志。
+- **本周概览**：新增 `GET /api/bili-pond/insights` 与设置页卡片 —— 近 7 天挑中数 / token 用量
+  （聚合现成的 usage-log.jsonl）/ 跳过原因 top，零新记账。
+- **口味漂移检测**：推荐流/关注动态连续 3 轮「跑成了但 0 挑中」⇒ 状态与概览挂提醒
+  （提示切混合档或改屏蔽词）；状态接口带 `driftStreak`。
+- **风控纪律修正**：`bili_feed` 撞风控码（-352/-412/-799/-509）**不再退旧接口** ——
+  绕风控只会加深，直接报错交给宿主熔断；签名/未登录类才允许兜底。
+- **view 缓存**：补简介走 `view-cache.json`（BILI_DUTY_HOME 下，原子写、上限 3000 条），
+  同一视频永远只查一次接口 —— 每轮 API 调用大减，风控风险跟着降。
+- **测试**：`test-feed-filter.py` 新增放行词与风控兜底断言（35 例）；
+  `test-source-filter.mjs` 新增关注档 / 放行词 / pushUrl / insights / filter-log / 漂移字段（15 例）。
+
 ## 1.4.3（2026-10-30）
 
 - **抓出「登录态失效也不报错」的静默坑**：rcmd 对过期/未生效的 SESSDATA 不返回错误，

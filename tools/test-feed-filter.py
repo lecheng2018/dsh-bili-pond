@@ -20,6 +20,7 @@ wanted = {
     "_ADS_WORDS", "_RESOURCE_WORDS", "_NETDISK_WORDS", "_CONTACT_WORDS",
     "_SHORTLINK_HOSTS", "_SPAM_TLDS", "_URL_TRUSTED_HOSTS", "_URL_RE",
     "_url_hosts", "_screen_video", "_sec_to_dur", "_feed_items",
+    "_feed_should_fallback", "_RISK_CODES", "FILTER_ALLOW_DEFAULT", "FILTER_WORDS_DEFAULT",
 }
 nodes = []
 for node in tree.body:
@@ -29,7 +30,7 @@ for node in tree.body:
         nodes.append(node)
 
 assert len(nodes) == len(wanted), f"应从真实源码抽出 {len(wanted)} 个过滤节点，实际 {len(nodes)}"
-module = ast.Module(body=[ast.Import(names=[ast.alias(name="re")])] + nodes, type_ignores=[])
+module = ast.Module(body=[ast.Import(names=[ast.alias(name="re")]), ast.Import(names=[ast.alias(name="os")])] + nodes, type_ignores=[])
 ast.fix_missing_locations(module)
 ns = {}
 exec(compile(module, str(SRC), "exec"), ns)
@@ -84,12 +85,24 @@ hit = screen("原神最新版本解析", "本期讲新地图", "", words=("原�
 assert hit is not None and hit[0] == "word", f"自定义屏蔽词应生效：{hit}"
 assert screen("正常视频", "正文提了一句原神", "", words=("崩铁",)) is None, "屏蔽词不该跨条目误伤"
 
+# ── 5. 放行词（白名单）：命中就豁免所有规则（words 显式给黑词也拦不住放行词） ──
+hit = screen("Python 全套教程资源免费分享", "需要的加v：abc123，百度网盘自取", "某某",
+             words=("原神",), )
+assert hit is not None and hit[0] == "spam", "没有放行词时该挡"
+# 放行词在 env（FILTER_ALLOW_DEFAULT）里才生效 —— 这里没法直接注 env，抽出的函数读模块常量；
+# 放行词逻辑在 _screen_video 里读 FILTER_ALLOW_DEFAULT（测试里通过改 ns 常量验证）
+ns["FILTER_ALLOW_DEFAULT"] = ("学英语",)
+assert screen("Python 全套教程资源免费分享", "需要的加v：abc123", "学英语的秘密") is None, "放行词应豁免一切规则"
+ns["FILTER_ALLOW_DEFAULT"] = ()
+assert screen("Python 全套教程资源免费分享", "需要的加v：abc123", "") is not None, "放行词清掉后恢复拦截"
+
+# ── 6. 时长格式化 ──
 assert dur(93) == "1:33", dur(93)
 assert dur(3725) == "1:02:05", dur(3725)
 assert dur(45) == "0:45", dur(45)
 assert dur(None) == "0:00", dur(None)
 
-# ── 5. 推荐流响应归一（_feed_items）：两种口径 + 广告卡过滤 ──
+# ── 7. 推荐流响应归一（_feed_items）：三种口径 + 广告卡过滤 ──
 feed_items = ns["_feed_items"]
 video = lambda bv, goto=None: {"bvid": bv, "title": "t", **({"goto": goto} if goto else {})}
 # 老口径：data 直接是数组；无 goto 的普通卡要收，广告卡(cm)/番剧卡要丢，没 bvid 的要丢
@@ -104,4 +117,13 @@ new_style = {"items": [video("BVnew1", "av"), video("BVnew2", "av")]}
 assert [v["bvid"] for v in feed_items(new_style)] == ["BVnew1", "BVnew2"], "新口径归一不对"
 assert feed_items(None) == [] and feed_items(42) == [] and feed_items({}) == [], "异常输入应给空列表"
 
-print(f"[OK] feed filter tests: {len(passed) + len(ads_cases) + len(spam_cases) + 11} cases")
+# ── 8. 风控兜底纪律（_feed_should_fallback）：签名/路径类可退，风控码绝不能退 ──
+should = ns["_feed_should_fallback"]
+assert should(-403) is True, "签名被拒可以退旧接口"
+assert should(-101) is True, "未登录可以退旧接口"
+assert should(-1) is True, "HTTP 非 JSON 可以退旧接口"
+assert should(-352) is False, "-352 风控绝不能绕（换接口只会加深）"
+assert should(-412) is False, "-412 风控绝不能绕"
+assert should(-799) is False and should(-509) is False, "其余风控码同样不能绕"
+
+print(f"[OK] feed filter tests: {len(passed) + len(ads_cases) + len(spam_cases) + 21} cases")

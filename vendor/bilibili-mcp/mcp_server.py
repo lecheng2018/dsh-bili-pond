@@ -28,6 +28,11 @@ B站数据采集 MCP 服务，支持 OpenClaw / Claude Code / Cursor / Cline
 #         MCP 层做确定性过滤（广告 / 引流小号 / 短链简介），被挡的视频不下发给模型 —— 零 token 成本；
 #         过滤开关与屏蔽词由宿主经 env 下发（BILI_FILTER_ADS / BILI_FILTER_SPAM / BILI_FILTER_WORDS /
 #         BILI_FILTER_MIN_FANS）
+#      ⑫ 新增 `bili_follow_feed`：关注动态流（feed/all?type=video，登录态），追 UP 主更新比推荐流及时
+#      ⑬ 风控纪律：bili_feed 撞 -352/-412 等风控码**不再退旧接口**（绕风控只会加深），直接报错交给宿主熔断
+#      ⑭ view 补简介走本地缓存（BILI_DUTY_HOME/view-cache.json）：同一视频永远只查一次接口
+#      ⑮ 过滤放行词（BILI_FILTER_ALLOW）：标题/简介/UP 名命中就放行，误杀豁免用；
+#         被过滤的条目落 filter-log.jsonl（时间/BV/标题/规则），界面可查
 #      ⑫ `bili_search` 加 `filter` 参数：与 `bili_feed` 共用同一套过滤（默认值同样来自 env）
 import asyncio
 import json
@@ -121,6 +126,7 @@ _FILTER_ENV_BOOL = lambda name, dflt=True: os.environ.get(name, "1" if dflt else
 FILTER_ADS_DEFAULT = _FILTER_ENV_BOOL("BILI_FILTER_ADS", True)
 FILTER_SPAM_DEFAULT = _FILTER_ENV_BOOL("BILI_FILTER_SPAM", True)
 FILTER_WORDS_DEFAULT = tuple(w.strip() for w in os.environ.get("BILI_FILTER_WORDS", "").split("|") if w.strip())
+FILTER_ALLOW_DEFAULT = tuple(w.strip() for w in os.environ.get("BILI_FILTER_ALLOW", "").split("|") if w.strip())
 FILTER_MIN_FANS_DEFAULT = max(0, int(os.environ.get("BILI_FILTER_MIN_FANS", "0") or 0))
 
 # 明显广告词：命中任意一个就挡。这些都是「卖东西」的硬信号，正常的教程 / 测评 / 分享视频不会带。
@@ -200,6 +206,11 @@ def _screen_video(title: str, desc: str = "", author: str = "", words=None, ads:
     desc = str(desc or "")
     who = str(author or "")
     blob = f"{title} {desc} {who}"
+
+    # ⓪ 放行词优先：误杀豁免（宿主 BILI_FILTER_ALLOW 下发）—— 命中就整个跳过所有规则
+    for w in FILTER_ALLOW_DEFAULT:
+        if w and w in blob:
+            return None
 
     # ① 自定义屏蔽词：用户说了算，标题/简介/UP 名命中即挡
     for w in (FILTER_WORDS_DEFAULT if words is None else words):
@@ -610,9 +621,11 @@ async def bili_check_credential() -> str:
 
 # ========== Tool 1: 搜索视频 ==========
 
-async def _screen_result(videos: list, ads: bool, spam: bool, cred, include_blocked: bool, fans_floor: int):
+async def _screen_result(videos: list, ads: bool, spam: bool, cred, include_blocked: bool, fans_floor: int,
+                         source: str = "feed"):
     """对一批候选跑过滤，返回 (kept, blocked_samples)。
-    被挡的默认不下发；include_blocked=True 时留在原地并带 blocked 字段（调试用）。"""
+    被挡的默认不下发；include_blocked=True 时留在原地并带 blocked 字段（调试用）。
+    被挡的每一笔都落 filter-log.jsonl（时间/BV/标题/规则）—— 界面可查，误杀好反推白名单。"""
     kept, blocked = [], []
     for v in videos:
         hit = _screen_video(v.get("title", ""), v.get("description", "") or v.get("desc", ""),
@@ -625,9 +638,15 @@ async def _screen_result(videos: list, ads: bool, spam: bool, cred, include_bloc
                 kept.append(v)
             continue
         kept.append(v)
+    if blocked:
+        _filter_log(source, blocked)
     # UP 粉丝数门槛（默认关，开了要多打 user 接口）：对通过文本筛的候选查，低于门槛再挡
     if fans_floor > 0 and kept:
         await _apply_fans_floor(kept, cred, fans_floor)
+        fans_blocked = [v for v in kept if v.get("blocked")]
+        if fans_blocked:
+            _filter_log(source, [{"bvid": v.get("bvid", ""), "title": v.get("title", "")[:50],
+                                  "reason": v["blocked"]} for v in fans_blocked])
         survivors = []
         for v in kept:
             if v.get("blocked"):
@@ -638,6 +657,75 @@ async def _screen_result(videos: list, ads: bool, spam: bool, cred, include_bloc
             survivors.append(v)
         kept = survivors
     return kept, blocked[:5]
+
+
+_DUTY_HOME = Path(os.environ.get("BILI_DUTY_HOME", "."))
+_VIEW_CACHE_FILE = _DUTY_HOME / "view-cache.json"
+_view_cache: dict | None = None
+
+
+def _load_view_cache() -> dict:
+    global _view_cache
+    if _view_cache is None:
+        try:
+            j = json.loads(_VIEW_CACHE_FILE.read_text(encoding="utf-8"))
+            _view_cache = j if isinstance(j, dict) else {}
+        except Exception:
+            _view_cache = {}
+    return _view_cache
+
+
+def _save_view_cache(cache: dict):
+    try:
+        tmp = _VIEW_CACHE_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, _VIEW_CACHE_FILE)
+    except Exception:
+        pass  # 缓存写不进就每次现查，不影响值班
+
+
+async def _cached_view(bvid: str, cred):
+    """view 接口结果本地缓存（bvid → 简介/分区/aid）：同一视频永远只打一次接口。"""
+    cache = _load_view_cache()
+    hit = cache.get(bvid)
+    if isinstance(hit, dict) and "desc" in hit:
+        return hit
+    try:
+        resp = await _bili_api("GET", "https://api.bilibili.com/x/web-interface/view", cred,
+                               params={"bvid": bvid})
+        if resp.get("code") == 0:
+            d = resp.get("data") or {}
+            info = {"desc": (d.get("desc") or "")[:200], "tname": d.get("tname") or "",
+                    "aid": d.get("aid", 0), "pubdate": d.get("pubdate", 0)}
+            cache[bvid] = info
+            if len(cache) > 3000:  # 防文件无限膨胀：只留最近 3000 条
+                for k in list(cache.keys())[: len(cache) - 3000]:
+                    cache.pop(k, None)
+            _save_view_cache(cache)
+            await asyncio.sleep(0.12)   # 真打了接口才歇，缓存命中不歇
+            return info
+    except Exception:
+        pass
+    return None
+
+
+def _filter_log(source: str, blocked: list):
+    """把被挡的条目追加进 BILI_DUTY_HOME/filter-log.jsonl（best-effort，绝不影响值班）。"""
+    try:
+        f = _DUTY_HOME / "filter-log.jsonl"
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+        with open(f, "a", encoding="utf-8") as fp:
+            for e in blocked:
+                fp.write(json.dumps({"t": ts, "source": source, **e}, ensure_ascii=False) + "\n")
+        # 文件超 300KB 就只留最近 500 行，别无声地长
+        try:
+            if f.exists() and f.stat().st_size > 300_000:
+                lines = f.read_text(encoding="utf-8").splitlines()
+                f.write_text("\n".join(lines[-500:]) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 @tool()
@@ -694,7 +782,7 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank",
     if use_filter:
         cred = load_credential()
         videos, samples = await _screen_result(videos, ads_on, spam_on, cred,
-                                               include_blocked, FILTER_MIN_FANS_DEFAULT)
+                                               include_blocked, FILTER_MIN_FANS_DEFAULT, source="search")
         filtered = len(samples) if not include_blocked else len([v for v in videos if v.get("blocked")])
 
     return json.dumps({"keyword": keyword, "count": len(videos), "videos": videos,
@@ -733,28 +821,43 @@ def _feed_items(data):
 
 
 async def _desc_enrich(videos: list, cred):
-    """rcmd 的卡片**不带简介/分区名**（过滤规则会瞎一半）⇒ 对窗口内缺 desc 的条目用 view 接口
-    尽力补全：间隔 120ms、失败就跳过（不挡视频，只影响过滤灵敏度）。"""
+    """rcmd 的卡片**不带简介/分区名**（过滤规则会瞎一半）⇒ 对窗口内缺 desc 的条目补全：
+    走本地缓存（同一视频只查一次接口），失败就跳过（不挡视频，只影响过滤灵敏度）。"""
     for v in videos:
         if v.get("desc"):
             continue
         bvid = v.get("bvid")
         if not bvid:
             continue
-        try:
-            resp = await _bili_api("GET", "https://api.bilibili.com/x/web-interface/view", cred,
-                                   params={"bvid": bvid})
-            if resp.get("code") == 0:
-                d = resp.get("data") or {}
-                v["desc"] = (d.get("desc") or "")[:200]
-                v["tname"] = d.get("tname") or ""
-                if not v.get("aid"):
-                    v["aid"] = d.get("aid", 0)
-                if not v.get("pubdate"):
-                    v["pubdate"] = d.get("pubdate", 0)
-        except Exception:
-            pass
-        await asyncio.sleep(0.12)
+        info = await _cached_view(bvid, cred)
+        if info:
+            v["desc"] = info.get("desc") or ""
+            v["tname"] = info.get("tname") or ""
+            if not v.get("aid"):
+                v["aid"] = info.get("aid", 0)
+            if not v.get("pubdate"):
+                v["pubdate"] = info.get("pubdate", 0)
+
+
+def _num(x):
+    """「2.3万」/「1.2亿」/「45」→ 数字；解析不了给 0（动态卡片的 stat 常是带单位的字符串）。"""
+    s = str(x or "").strip().replace(",", "")
+    m = re.match(r"^([\d.]+)\s*(万|亿)?$", s)
+    if not m:
+        return 0
+    n = float(m.group(1))
+    if m.group(2) == "万":
+        n *= 10_000
+    elif m.group(2) == "亿":
+        n *= 100_000_000
+    return int(n)
+
+
+def _feed_should_fallback(code) -> bool:
+    """推荐流失败时该不该退旧接口（纯函数，可测）：
+    签名/路径/未登录这类（-403 / -101 / -1）退了能救；风控码（-352/-412…）绝不能退 ——
+    风控的语义是「请求太频繁」，换接口绕过去只会加深，该停手交给宿主熔断。"""
+    return int(code or 0) not in _RISK_CODES
 
 
 @tool()
@@ -808,6 +911,10 @@ async def bili_feed(pn: int = 1, ps: int = 20,
     personalized = True
     note = ""
     if code != 0:
+        if not _feed_should_fallback(code):
+            # ⭐ 风控码（-352/-412…）：换接口绕过去只会加深 —— 直接报错，宿主会熔断 30 分钟
+            return json.dumps({"ok": False, "error": _risk_text(code, resp.get("message", ""))},
+                              ensure_ascii=False)
         # 兜底：旧接口 index/top（全站通用内容、非个性化）—— 聊胜于无，但要让使用者知道这轮不是「他的」推荐
         fallback = await _bili_api("GET", "https://api.bilibili.com/x/web-interface/index/top", cred,
                                    params={"ps": ps, "fresh_idx": pn * ps, "fresh_idx_1h": pn * ps, "fresh_idx_4h": pn * ps})
@@ -855,10 +962,77 @@ async def bili_feed(pn: int = 1, ps: int = 20,
         if personalized:
             await _desc_enrich(videos, cred)
         videos, samples = await _screen_result(videos, ads_on, spam_on, cred,
-                                               include_blocked, FILTER_MIN_FANS_DEFAULT)
+                                               include_blocked, FILTER_MIN_FANS_DEFAULT, source="feed")
         filtered = len(samples) if not include_blocked else len([v for v in videos if v.get("blocked")])
 
     return json.dumps({"page": pn, "personalized": personalized, "note": note, "count": len(videos), "videos": videos,
+                       "filtered": filtered, "filteredSamples": samples}, ensure_ascii=False)
+
+
+# ========== Tool 1c: 关注动态 ==========
+
+@tool()
+async def bili_follow_feed(pn: int = 1, ps: int = 20,
+                           filter: bool | None = None, include_blocked: bool = False) -> str:
+    """
+    获取B站「关注动态」—— 当前账号**已关注 UP 主**的最新视频投稿。比推荐流更及时：
+    关注的人发了新视频，这里第一条就能看到（推荐流经常推旧的）。
+
+    Args:
+        pn: 第几页（1 起，接口用 page 翻页）
+        ps: 想要几条（默认20，最大30；实际以接口返回为准，只收视频卡）
+        filter: 是否过滤广告/引流视频（None = 按宿主设置来，默认开）
+        include_blocked: True = 被过滤的视频也返回并带 blocked 原因（调试用，默认False）
+
+    Returns:
+        JSON：videos 列表（字段与 bili_search 对齐）；被过滤的条数在 filtered（样例在 filteredSamples）。
+        ⚠️ 必须登录且有关注的 UP；返回空列表多半是「关注的人最近没投稿」。
+    """
+    cred = get_cred()
+    ps = max(1, min(int(ps or 20), 30))
+    pn = max(1, int(pn or 1))
+    params = {"timezone_offset": -480, "features": "itemOpusStyle", "page": pn, "type": "video"}
+    resp = await _bili_api("GET", "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/all", cred, params=params)
+    if resp.get("code") != 0:
+        return json.dumps({"ok": False, "error": _risk_text(resp.get("code"), resp.get("message", ""))},
+                          ensure_ascii=False)
+
+    raw = ((resp.get("data") or {}).get("items")) or []
+    videos = []
+    for it in raw:
+        if it.get("type") and it.get("type") != "DYNAMIC_TYPE_AV":
+            continue   # 转发/纯文字/专栏/课程动态都不要，只收视频投稿卡
+        mods = it.get("modules") or {}
+        arc = ((mods.get("module_dynamic") or {}).get("major") or {}).get("archive") or {}
+        if not arc.get("bvid"):
+            continue
+        author = mods.get("module_author") or {}
+        arc_stat = arc.get("stat") or {}
+        videos.append({
+            "bvid": arc.get("bvid", ""),
+            "aid": arc.get("aid", 0),
+            "title": arc.get("title", ""),
+            "author": author.get("name", ""),
+            "mid": author.get("mid", 0),
+            "play": _num(arc_stat.get("view") or arc_stat.get("play")),
+            "like": _num(arc_stat.get("like")),
+            "duration": arc.get("duration_text") or "",
+            "desc": (arc.get("desc") or "")[:200],
+            "tname": arc.get("tname") or "",
+            "pubdate": author.get("pub_ts", 0),
+        })
+
+    use_filter = bool(filter) if filter is not None else (FILTER_ADS_DEFAULT or FILTER_SPAM_DEFAULT)
+    ads_on, spam_on = (True, True) if filter is True else (FILTER_ADS_DEFAULT, FILTER_SPAM_DEFAULT)
+    filtered, samples = 0, []
+    if use_filter:
+        # 动态卡片简介有时被截断/缺失 ⇒ 补全（走缓存）再过筛
+        await _desc_enrich(videos, cred)
+        videos, samples = await _screen_result(videos, ads_on, spam_on, cred,
+                                               include_blocked, FILTER_MIN_FANS_DEFAULT, source="follow")
+        filtered = len(samples) if not include_blocked else len([v for v in videos if v.get("blocked")])
+
+    return json.dumps({"page": pn, "count": len(videos), "videos": videos,
                        "filtered": filtered, "filteredSamples": samples}, ensure_ascii=False)
 
 
